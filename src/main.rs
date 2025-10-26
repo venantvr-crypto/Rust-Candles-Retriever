@@ -137,6 +137,16 @@ fn main() -> Result<()> {
     // &timeframes = itère sur des références (&str) au lieu de consommer le vecteur
     // Sinon, timeframes serait déplacé (moved) et on ne pourrait plus l'utiliser après
     for tf in &timeframes {
+        // ALGORITHME: Vérifier si le timeframe est déjà complet
+        // Si is_complete=1, on saute ce timeframe (déjà traité jusqu'à la limite historique)
+        if is_timeframe_complete(&conn, "binance", &symbol, tf) {
+            println!(
+                "⏭️  Timeframe {} déjà complet pour {}. Passage au suivant.",
+                tf, symbol
+            );
+            continue;
+        }
+
         println!("Récupération pour le timeframe: {}...", tf);
 
         // SUBTILITÉ RUST #9: Emprunt mutable (&mut)
@@ -202,6 +212,82 @@ fn get_last_candle_time(
 }
 
 // ============================================================================
+// GESTION DU STATUT DES TIMEFRAMES
+// ============================================================================
+
+/// Vérifie si un timeframe est marqué comme complet
+///
+/// ALGORITHME:
+/// Un timeframe est "complet" quand on a atteint la limite historique de l'API
+/// (pas de nouvelles bougies retournées par l'API)
+///
+/// RETOUR:
+/// - true: timeframe déjà complet, pas besoin de le re-traiter
+/// - false: timeframe incomplet ou jamais traité
+fn is_timeframe_complete(conn: &Connection, provider: &str, symbol: &str, timeframe: &str) -> bool {
+    conn.query_row(
+        "SELECT is_complete FROM timeframe_status
+         WHERE provider = ?1 AND symbol = ?2 AND timeframe = ?3",
+        params![provider, symbol, timeframe],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
+        == 1
+}
+
+/// Marque un timeframe comme complet
+///
+/// ALGORITHME:
+/// Appelé quand l'API retourne 0 bougies (limite historique atteinte)
+/// Permet au programme de sauter ce timeframe lors des prochaines exécutions
+///
+/// SUBTILITÉ RUST #26: INSERT OR REPLACE
+/// Upsert SQLite: insère si n'existe pas, met à jour si existe
+/// Plus simple que INSERT ... ON CONFLICT UPDATE
+fn mark_timeframe_complete(
+    conn: &Connection,
+    provider: &str,
+    symbol: &str,
+    timeframe: &str,
+    oldest_candle_time: Option<i64>,
+) -> Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO timeframe_status
+         (provider, symbol, timeframe, oldest_candle_time, is_complete, last_updated)
+         VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+        params![provider, symbol, timeframe, oldest_candle_time, now],
+    )?;
+
+    Ok(())
+}
+
+/// Met à jour la progression d'un timeframe (sans le marquer comme complet)
+///
+/// ALGORITHME:
+/// Appelé régulièrement pendant la récupération pour tracker la progression
+/// Utile pour le monitoring et le debug
+fn update_timeframe_progress(
+    conn: &Connection,
+    provider: &str,
+    symbol: &str,
+    timeframe: &str,
+    oldest_candle_time: i64,
+) -> Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO timeframe_status
+         (provider, symbol, timeframe, oldest_candle_time, is_complete, last_updated)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        params![provider, symbol, timeframe, oldest_candle_time, now],
+    )?;
+
+    Ok(())
+}
+
+// ============================================================================
 // CONFIGURATION BASE DE DONNÉES
 // ============================================================================
 
@@ -247,6 +333,30 @@ fn setup_database() -> SqlResult<Connection> {
             UNIQUE(provider, symbol, timeframe, open_time)
         )",
         [], // Pas de paramètres pour cette requête
+    )?;
+
+    // ALGORITHME: Table de statut pour tracker la complétion des timeframes
+    // Cette table résout le problème de boucle infinie quand on atteint la limite historique
+    //
+    // PROBLÈME RÉSOLU:
+    // Sans cette table, quand l'API Binance retourne 0 bougies (limite historique atteinte),
+    // le programme continue de boucler sur le même timeframe au lieu de passer au suivant
+    //
+    // SOLUTION:
+    // - is_complete=1: le timeframe a été entièrement récupéré jusqu'à la limite historique
+    // - oldest_candle_time: timestamp de la bougie la plus ancienne récupérée
+    // - last_updated: timestamp de la dernière mise à jour (pour débug/monitoring)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS timeframe_status (
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            oldest_candle_time INTEGER,
+            is_complete INTEGER NOT NULL DEFAULT 0,
+            last_updated INTEGER NOT NULL,
+            PRIMARY KEY (provider, symbol, timeframe)
+        )",
+        [],
     )?;
 
     // SUBTILITÉ RUST #12: Move sémantic
@@ -388,6 +498,24 @@ fn fetch_and_store_klines(
                 "Aucune bougie supplémentaire retournée par l'API. Arrêt pour {}/{}.",
                 symbol, timeframe
             );
+
+            // ALGORITHME: Marquer le timeframe comme complet
+            // On a atteint la limite historique de l'API Binance
+            // Lors de la prochaine exécution, ce timeframe sera sauté
+            let oldest_time = get_last_candle_time(conn, "binance", symbol, timeframe);
+            if let Err(e) = mark_timeframe_complete(conn, "binance", symbol, timeframe, oldest_time)
+            {
+                eprintln!(
+                    "⚠️  Erreur lors du marquage du timeframe comme complet: {}",
+                    e
+                );
+            } else {
+                println!(
+                    "✅ Timeframe {}/{} marqué comme complet (limite historique atteinte)",
+                    symbol, timeframe
+                );
+            }
+
             break;
         }
 
@@ -446,6 +574,14 @@ fn fetch_and_store_klines(
             inserted_in_batch,
             format_timestamp_ms(oldest_kline_time)
         );
+
+        // ALGORITHME: Mettre à jour la progression du timeframe
+        // Permet de tracker où on en est dans la récupération historique
+        if let Err(e) =
+            update_timeframe_progress(conn, "binance", symbol, timeframe, oldest_kline_time)
+        {
+            eprintln!("⚠️  Erreur lors de la mise à jour de la progression: {}", e);
+        }
 
         // Combler les trous dans le batch qui vient d'être inséré
         let filled = fill_gaps_in_range(

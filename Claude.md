@@ -55,23 +55,24 @@ src/
 ### Database Schema
 
 ```sql
-CREATE TABLE candlesticks (
-    provider TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    timeframe TEXT NOT NULL,
-    open_time INTEGER NOT NULL,
-    open REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    close REAL NOT NULL,
-    volume REAL NOT NULL,
-    close_time INTEGER NOT NULL,
-    quote_asset_volume REAL NOT NULL,
-    number_of_trades INTEGER NOT NULL,
-    taker_buy_base_asset_volume REAL NOT NULL,
-    taker_buy_quote_asset_volume REAL NOT NULL,
-    interpolated INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(provider, symbol, timeframe, open_time)
+CREATE TABLE candlesticks
+(
+    provider                     TEXT    NOT NULL,
+    symbol                       TEXT    NOT NULL,
+    timeframe                    TEXT    NOT NULL,
+    open_time                    INTEGER NOT NULL,
+    open                         REAL    NOT NULL,
+    high                         REAL    NOT NULL,
+    low                          REAL    NOT NULL,
+    close                        REAL    NOT NULL,
+    volume                       REAL    NOT NULL,
+    close_time                   INTEGER NOT NULL,
+    quote_asset_volume           REAL    NOT NULL,
+    number_of_trades             INTEGER NOT NULL,
+    taker_buy_base_asset_volume  REAL    NOT NULL,
+    taker_buy_quote_asset_volume REAL    NOT NULL,
+    interpolated                 INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (provider, symbol, timeframe, open_time)
 )
 ```
 
