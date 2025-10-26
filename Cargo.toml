@@ -1,0 +1,14 @@
+[package]
+name = "rust_candles_retriever"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+binance = "0.21.0" # Vérifie la dernière version de binance-rs
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
+thiserror = "2.0.17"
+anyhow = "1.0" # Pour une gestion d'erreurs plus simple
