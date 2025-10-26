@@ -25,10 +25,6 @@ check: ## Vérifie le code sans compiler
 	@echo "$(GREEN)Vérification du code...$(NC)"
 	$(CARGO) check
 
-test: ## Lance les tests
-	@echo "$(GREEN)Exécution des tests...$(NC)"
-	$(CARGO) test
-
 clean: ## Nettoie les fichiers générés
 	@echo "$(GREEN)Nettoyage...$(NC)"
 	$(CARGO) clean
@@ -69,24 +65,6 @@ run-btc-from: ## Lance BTCUSDT avec START_DATE
 run-sol-from: ## Lance SOLUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour SOLUSDT depuis $(START_DATE)...$(NC)"
 	$(CARGO) run --bin $(BINARY) -- --symbol SOLUSDT --start-date $(START_DATE) --db-file $(DB_FILE)
-
-# Utilitaires de test
-
-test-gap-fill: ## Lance le test de gap filling
-	@echo "$(GREEN)Test de gap filling...$(NC)"
-	$(CARGO) run --bin test_gap_fill
-
-test-isolation: ## Lance le test d'isolation
-	@echo "$(GREEN)Test d'isolation...$(NC)"
-	$(CARGO) run --bin test_isolation
-
-test-resume: ## Lance le test de mode reprise
-	@echo "$(GREEN)Test de mode reprise...$(NC)"
-	$(CARGO) run --bin test_resume_mode
-
-verify-data: ## Vérifie les données dans la base
-	@echo "$(GREEN)Vérification des données...$(NC)"
-	$(CARGO) run --bin verify_data
 
 # Développement
 
