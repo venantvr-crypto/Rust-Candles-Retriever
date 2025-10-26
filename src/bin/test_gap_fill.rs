@@ -59,6 +59,7 @@ fn setup_database(db_file: &str) -> Result<Connection> {
             number_of_trades INTEGER NOT NULL,
             taker_buy_base_asset_volume REAL NOT NULL,
             taker_buy_quote_asset_volume REAL NOT NULL,
+            interpolated INTEGER NOT NULL DEFAULT 0,
             UNIQUE(provider, symbol, timeframe, open_time)
         )",
         [],
@@ -97,8 +98,8 @@ fn insert_test_data_with_gaps(conn: &mut Connection) -> Result<()> {
             "INSERT INTO candlesticks (
                 provider, symbol, timeframe, open_time, open, high, low, close, volume,
                 close_time, quote_asset_volume, number_of_trades,
-                taker_buy_base_asset_volume, taker_buy_quote_asset_volume
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                taker_buy_base_asset_volume, taker_buy_quote_asset_volume, interpolated
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?;
 
         for (index, open, high, low, close, volume) in candles {
@@ -120,6 +121,7 @@ fn insert_test_data_with_gaps(conn: &mut Connection) -> Result<()> {
                 (volume / 10.0) as i64, // number_of_trades
                 volume * 0.4,           // taker_buy_base
                 volume * 40.0,          // taker_buy_quote
+                0,                      // interpolated = 0 (données réelles)
             ])?;
         }
     }
@@ -232,8 +234,8 @@ fn fill_gaps(conn: &mut Connection) -> Result<i64> {
             "INSERT OR IGNORE INTO candlesticks (
                 provider, symbol, timeframe, open_time, open, high, low, close, volume,
                 close_time, quote_asset_volume, number_of_trades,
-                taker_buy_base_asset_volume, taker_buy_quote_asset_volume
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                taker_buy_base_asset_volume, taker_buy_quote_asset_volume, interpolated
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?;
 
         for i in 0..candles.len() - 1 {
@@ -289,6 +291,7 @@ fn fill_gaps(conn: &mut Connection) -> Result<i64> {
                         interpolated_trades,
                         interpolated_taker_base,
                         interpolated_taker_quote,
+                        1, // interpolated = 1 (données interpolées)
                     ])?;
 
                     println!(

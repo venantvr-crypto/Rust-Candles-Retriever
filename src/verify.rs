@@ -1,9 +1,30 @@
+// ============================================================================
+// MODULE DE VÉRIFICATION DE L'INTÉGRITÉ DES DONNÉES
+// ============================================================================
+//
+// Ce module vérifie que les données stockées sont continues et correctement espacées
+// Il détecte:
+// - Les GAPS (trous): intervalles trop grands entre les bougies
+// - Les OVERLAPS (chevauchements): intervalles trop petits ou négatifs
+// - Les statistiques globales: nombre total, plage temporelle, etc.
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 /// Vérifie que les dates dans la base de données sont espacées de façon homogène
-/// Retourne un rapport avec les statistiques et les anomalies trouvées
+///
+/// ALGORITHME DE VÉRIFICATION:
+/// 1. Détermine l'intervalle attendu selon le timeframe
+/// 2. Parcourt toutes les bougies séquentiellement
+/// 3. Compare chaque intervalle avec l'intervalle attendu
+/// 4. Classe les anomalies: gaps (intervalle trop grand) ou overlaps (trop petit)
+/// 5. Calcule des statistiques: nombre de bougies, période couverte, etc.
+/// 6. Affiche un rapport détaillé des anomalies trouvées
+///
+/// SUBTILITÉ RUST #17: pub fn
+/// pub = fonction publique, accessible depuis d'autres modules
+/// Sans pub, la fonction serait privée au module (visibility par défaut)
 pub fn verify_data_spacing(
     conn: &Connection,
     provider: &str,
@@ -52,31 +73,47 @@ pub fn verify_data_spacing(
 
     let mut rows = stmt.query(params![provider, symbol, timeframe])?;
 
+    // SUBTILITÉ RUST #18: Accumulateurs mutables
+    // Toutes ces variables sont déclarées mut car modifiées dans la boucle
     let mut previous_time: Option<i64> = None;
+
+    // SUBTILITÉ RUST #19: Vec avec types tuples
+    // Vec<(i64, i64, i64)> = vecteur de tuples à 3 éléments
+    // Plus simple qu'une struct quand on n'a besoin que de stocker temporairement
     let mut gaps: Vec<(i64, i64, i64)> = Vec::new(); // (timestamp, interval, expected)
     let mut overlaps: Vec<(i64, i64)> = Vec::new(); // (timestamp, interval)
     let mut total_count = 0;
     let mut first_timestamp: Option<i64> = None;
     let mut last_timestamp: Option<i64> = None;
 
+    // SUBTILITÉ RUST #20: while let - pattern matching dans une boucle
+    // Équivalent à: loop { match rows.next()? { Some(row) => ..., None => break } }
+    // Plus idiomatique et concis que la version avec loop/match
     while let Some(row) = rows.next()? {
         let current_time: i64 = row.get(0)?;
 
+        // SUBTILITÉ RUST #21: Option::is_none()
+        // Méthode helper pour tester si Option == None
+        // Alternative: match first_timestamp { None => ..., Some(_) => ... }
         if first_timestamp.is_none() {
             first_timestamp = Some(current_time);
         }
         last_timestamp = Some(current_time);
 
+        // ALGORITHME: Détection des anomalies par comparaison d'intervalles
         if let Some(prev) = previous_time {
             let interval = current_time - prev;
 
-            // Vérifier si l'intervalle est différent de l'attendu
+            // Trois cas possibles:
+            // 1. interval == expected: OK
+            // 2. interval > expected: GAP (données manquantes)
+            // 3. interval < expected: OVERLAP (duplication ou erreur)
             if interval != expected_interval_ms {
                 if interval > expected_interval_ms {
-                    // Gap (trou dans les données)
+                    // Gap détecté - stocker pour rapport
                     gaps.push((prev, interval, expected_interval_ms));
                 } else if interval < expected_interval_ms {
-                    // Overlap ou duplication
+                    // Overlap détecté - stocker pour rapport
                     overlaps.push((prev, interval));
                 }
             }
