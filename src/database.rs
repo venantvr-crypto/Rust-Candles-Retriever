@@ -62,14 +62,13 @@ impl DatabaseManager {
             [],
         )?;
 
-        // Table de statut des timeframes
+        // Table de statut des timeframes (pour monitoring uniquement)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS timeframe_status (
                 provider TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 timeframe TEXT NOT NULL,
                 oldest_candle_time INTEGER,
-                is_complete INTEGER NOT NULL DEFAULT 0,
                 last_updated INTEGER NOT NULL,
                 PRIMARY KEY (provider, symbol, timeframe)
             )",

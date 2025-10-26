@@ -1,21 +1,16 @@
 /// Programme principal de récupération des chandeliers Binance
 ///
-/// ARCHITECTURE REFACTORÉE:
-/// Ce programme utilise une architecture modulaire avec séparation des responsabilités:
-/// - database: Gestion de la connexion et du schéma SQLite
-/// - timeframe_status: Gestion du statut de complétion des timeframes
-/// - retriever: Récupération des bougies depuis l'API Binance
-/// - gap_filler: Interpolation linéaire des trous
-/// - verify: Vérification de l'intégrité des données
+/// ARCHITECTURE SIMPLIFIÉE:
+/// - Récupère 1000 bougies à la fois depuis maintenant (ou dernière bougie)
+/// - Parcourt tous les timeframes simultanément
+/// - Retire dynamiquement les timeframes qui n'insèrent plus rien
+/// - Arrêt automatique quand tous les timeframes sont épuisés ou date limite atteinte
 use anyhow::Result;
 use binance::api::*;
 use binance::market::*;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::Parser;
-use rust_candles_retriever::{
-    database::DatabaseManager, retriever::CandleRetriever, timeframe_status::TimeframeStatus,
-    verify,
-};
+use rust_candles_retriever::{database::DatabaseManager, retriever::CandleRetriever};
 
 /// Arguments CLI du programme
 #[derive(Parser, Debug)]
@@ -28,14 +23,6 @@ struct Args {
     /// Date de début au format YYYY-MM-DD
     #[arg(short = 'd', long)]
     start_date: Option<String>,
-
-    /// Vérifier l'espacement des données après récupération
-    #[arg(short = 'v', long)]
-    verify: bool,
-
-    /// Forcer le retraitement des timeframes complets
-    #[arg(short = 'f', long)]
-    force: bool,
 
     /// Fichier de base de données
     #[arg(long, default_value = "candlesticks.db")]
@@ -50,10 +37,11 @@ fn main() -> Result<()> {
 
     // Initialiser la base de données
     let mut db = DatabaseManager::new(&args.db_file)?;
-    println!("Base de données initialisée.");
+    println!("Base de données initialisée.\n");
 
-    // Timeframes supportés
-    let timeframes = vec!["5m", "15m", "30m", "1h"];
+    // Timeframes supportés - liste dynamique
+    let mut active_timeframes: Vec<&str> =
+        vec!["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"];
 
     // Initialiser le client Binance
     let market: Market = Binance::new(None, None);
@@ -61,57 +49,71 @@ fn main() -> Result<()> {
     // Parser la date de début si fournie
     let start_timestamp_ms = parse_start_date(args.start_date.as_deref())?;
 
-    // Traiter chaque timeframe
-    for tf in &timeframes {
-        // Vérifier si le timeframe est déjà complet (sauf si --force)
-        if !args.force && TimeframeStatus::is_complete(db.connection(), "binance", &symbol, tf) {
-            println!(
-                "⏭️  Timeframe {} déjà complet pour {}. Passage au suivant.",
-                tf, symbol
+    // Boucle principale: traiter tous les timeframes simultanément
+    let mut iteration = 0;
+    loop {
+        iteration += 1;
+        println!("═══ Itération #{} ═══", iteration);
+        println!("Timeframes actifs: {:?}\n", active_timeframes);
+
+        if active_timeframes.is_empty() {
+            println!("✅ Tous les timeframes ont été traités complètement!");
+            break;
+        }
+
+        let mut exhausted_timeframes = Vec::new();
+
+        // Traiter chaque timeframe actif
+        for tf in &active_timeframes {
+            println!("→ Traitement du timeframe {}...", tf);
+
+            let mut retriever = CandleRetriever::new(
+                &market,
+                db.connection_mut(),
+                &symbol,
+                tf,
+                start_timestamp_ms,
             );
-            println!("   (Utilisez --force pour forcer le retraitement)");
-            continue;
+
+            match retriever.fetch_one_batch() {
+                Ok((inserted, is_exhausted)) => {
+                    if inserted > 0 {
+                        println!("  ✓ {} nouvelles bougies insérées", inserted);
+                    }
+
+                    // Retirer du pool si: date limite atteinte OU plus d'insertions
+                    if is_exhausted || inserted == 0 {
+                        if is_exhausted {
+                            println!("  🏁 Timeframe {} épuisé (date limite atteinte)", tf);
+                        } else {
+                            println!("  🏁 Timeframe {} épuisé (plus de nouvelles données)", tf);
+                        }
+                        exhausted_timeframes.push(*tf);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  ⚠  Erreur: {}", e);
+                }
+            }
         }
 
-        if args.force && TimeframeStatus::is_complete(db.connection(), "binance", &symbol, tf) {
+        // Retirer les timeframes épuisés du pool actif
+        active_timeframes.retain(|tf| !exhausted_timeframes.contains(tf));
+
+        if !exhausted_timeframes.is_empty() {
             println!(
-                "🔄 Mode --force activé: retraitement du timeframe {} pour {}",
-                tf, symbol
+                "\n🗑  Timeframes retirés du pool: {:?}",
+                exhausted_timeframes
             );
         }
 
-        println!("Récupération pour le timeframe: {}...", tf);
+        println!();
 
-        // Créer le récupérateur et lancer la récupération
-        let mut retriever = CandleRetriever::new(
-            &market,
-            db.connection_mut(),
-            &symbol,
-            tf,
-            start_timestamp_ms,
-        );
-
-        match retriever.fetch_and_store() {
-            Ok(count) => println!("Terminé pour {}. {} nouvelles bougies insérées.", tf, count),
-            Err(e) => eprintln!("Erreur lors de la récupération pour {}: {}", tf, e),
-        }
+        // Pause pour respecter les rate limits
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
     println!("Toutes les opérations sont terminées.");
-
-    // Vérification optionnelle de l'intégrité
-    if args.verify {
-        println!("\n========================================");
-        println!("VÉRIFICATION DE L'ESPACEMENT DES DONNÉES");
-        println!("========================================");
-
-        for tf in &timeframes {
-            if let Err(e) = verify::verify_data_spacing(db.connection(), "binance", &symbol, tf) {
-                eprintln!("Erreur lors de la vérification pour {}: {}", tf, e);
-            }
-        }
-    }
-
     Ok(())
 }
 
