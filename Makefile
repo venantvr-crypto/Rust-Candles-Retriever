@@ -1,4 +1,4 @@
-.PHONY: help build check test clean run-ada run-bnb run-btc run-sol verify-data
+.PHONY: help build check test clean run-ada run-bnb run-btc run-sol verify-data web fmt clippy doc db-status db-counts db-shell
 
 # Variables
 CARGO = cargo
@@ -93,3 +93,10 @@ db-counts: ## Affiche le nombre de bougies par timeframe
 db-shell: ## Ouvre un shell SQLite
 	@echo "$(GREEN)Ouverture du shell SQLite...$(NC)"
 	@sqlite3 $(DB_FILE)
+
+# Serveur Web
+
+web: ## Lance le serveur web (port 8080)
+	@echo "$(GREEN)Démarrage du serveur web sur http://127.0.0.1:8080$(NC)"
+	@echo "$(YELLOW)Ouvrez votre navigateur à: http://127.0.0.1:8080$(NC)"
+	DB_PATH=$(DB_FILE) $(CARGO) run --bin web_server

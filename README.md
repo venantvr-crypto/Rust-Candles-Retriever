@@ -1,24 +1,122 @@
-# Rust Candles Retriever
+# 📊 Rust Candles Retriever
 
-Récupère les données de chandeliers depuis Binance avec interpolation automatique des trous.
+Une application complète de récupération et visualisation de données de candlesticks (bougies) depuis l'API Binance.
 
-## Utilisation
+## 🚀 Fonctionnalités
+
+### Récupérateur de données (CLI)
+
+- ✅ Récupération automatique des bougies depuis Binance
+- ✅ Support de multiples timeframes (5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d)
+- ✅ Mode de reprise intelligent (continue où vous vous êtes arrêté)
+- ✅ Gestion dynamique des timeframes (retire automatiquement les timeframes épuisés)
+- ✅ Interpolation automatique des gaps
+- ✅ Stockage SQLite avec déduplication
+
+### 📈 Visualiseur Web (NOUVEAU!)
+
+- Interface web interactive avec [TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/)
+- 🔍 **Zoom dynamique intelligent** : change automatiquement de timeframe selon le niveau de zoom
+- 📊 Support de toutes les paires récupérées
+- 🎨 Interface moderne et responsive
+- ⚡ API REST haute performance
+
+## 🎯 Utilisation
+
+### 1. Récupération des données (CLI)
 
 ```bash
-# Récupérer toutes les données historiques
-cargo run --release -- --symbol BTCUSDT
-
-# Depuis une date spécifique
+# Via Cargo
 cargo run --release -- --symbol BTCUSDT --start-date "2024-01-01"
 
-# Forcer le retraitement d'un timeframe complet
-cargo run --release -- --symbol BTCUSDT --force
+# Via Makefile (plus pratique)
+make run-btc                    # Récupère BTCUSDT
+make run-ada                    # Récupère ADAUSDT
+make run-sol                    # Récupère SOLUSDT
+make run-bnb                    # Récupère BNBUSDT
+
+# Avec date de début spécifique
+make run-btc-from START_DATE=2024-01-01
 
 # Vérifier les données
 cargo run --bin verify_data -- --symbol BTCUSDT
+```
 
-# Avec vérification automatique après récupération
-cargo run --release -- --symbol BTCUSDT --verify
+### 2. Lancement du visualiseur web 🆕
+
+```bash
+# Via Makefile (recommandé)
+make web
+
+# Ou via Cargo
+DB_PATH=candlesticks.db cargo run --bin web_server
+```
+
+**Ouvrez ensuite votre navigateur à : http://127.0.0.1:8080**
+
+## 🖼️ Interface Web
+
+### Fonctionnalités principales
+
+1. **Sélection de paire** : Menu déroulant avec toutes les paires disponibles
+2. **Zoom intelligent** :
+    - Utilisez la molette de la souris pour zoomer
+    - Le timeframe s'adapte automatiquement :
+        - Zoom arrière → timeframes plus larges (1h, 4h, 1d)
+        - Zoom avant → timeframes plus fins (5m, 15m, 30m)
+3. **Affichage temps réel** : Indicateur du timeframe actuel
+4. **Compteur de bougies** : Nombre de données chargées
+
+### API REST
+
+L'application expose une API REST pour accéder aux données :
+
+#### `GET /api/pairs`
+
+Retourne toutes les paires disponibles avec leurs timeframes.
+
+```json
+[
+  {
+    "symbol": "BTCUSDT",
+    "timeframes": ["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
+  }
+]
+```
+
+#### `GET /api/candles?symbol=BTCUSDT&timeframe=5m&limit=1000`
+
+Retourne les données de candlesticks.
+
+**Paramètres:**
+
+- `symbol` : Paire de trading (requis)
+- `timeframe` : Timeframe souhaité (requis)
+- `limit` : Nombre max de bougies (défaut: 1000)
+- `offset` : Décalage pour pagination (défaut: 0)
+
+```json
+[
+  {
+    "time": 1761485700,
+    "open": 113606.53,
+    "high": 113639.99,
+    "low": 113533.29,
+    "close": 113639.98,
+    "volume": 27.56421
+  }
+]
+```
+
+#### `GET /health`
+
+Health check de l'API.
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0"
+}
 ```
 
 ## Fonctionnalités

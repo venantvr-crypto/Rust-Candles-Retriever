@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Candlestick Viewer - Chart Engine v2</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div class="title">
+            <span>📈</span>
+            Candlestick Viewer
+            <span class="badge">Engine v2</span>
+        </div>
+        <div class="controls">
+            <select id="pairSelector">
+                <option value="">Loading...</option>
+            </select>
+
+            <div class="timeframe-indicator">
+                <span>Timeframe:</span>
+                <span class="timeframe-badge" id="currentTimeframe">1d</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <div id="chart"></div>
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <div class="loading-text">Loading data...</div>
+        </div>
+    </div>
+
+    <div class="footer">
+        <div class="footer-item">
+            <span class="footer-label">Candles:</span>
+            <span class="footer-value" id="candleCount">0</span>
+        </div>
+        <div class="hint">
+            <span class="hint-icon">💡</span>
+            Scroll to zoom • Drag to pan • Auto-switches timeframe (80-200 bars)
+        </div>
+        <div class="footer-item">
+            <span class="footer-label">Status:</span>
+            <span class="footer-value" id="status">Ready</span>
+        </div>
+    </div>
+</div>
+
+<script src="chart-engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

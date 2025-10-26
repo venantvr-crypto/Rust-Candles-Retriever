@@ -40,8 +40,9 @@ fn main() -> Result<()> {
     println!("Base de données initialisée.\n");
 
     // Timeframes supportés - liste dynamique
-    let mut active_timeframes: Vec<&str> =
-        vec!["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"];
+    let mut active_timeframes: Vec<&str> = vec![
+        "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d",
+    ];
 
     // Initialiser le client Binance
     let market: Market = Binance::new(None, None);
