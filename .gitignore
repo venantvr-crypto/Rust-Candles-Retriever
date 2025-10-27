@@ -2,3 +2,4 @@
 /.idea
 *.db
 *.lock
+/web/node_modules/
