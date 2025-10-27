@@ -230,6 +230,10 @@ function initSettingsPanel(): void {
 
     bindSetting('lastPriceEnabled', 'lastPrice.enabled', 'checkbox');
 
+    bindSetting('indicatorsEnabled', 'indicators.enabled', 'checkbox');
+    bindSetting('indicatorsHeight', 'indicators.heightPercent', 'range', 'indicatorsHeightValue');
+    bindSetting('rsiOverlay', 'indicators.rsi.overlay', 'checkbox');
+
     bindSetting('theme', 'colors.theme', 'select', null, null, applyThemeChange);
 
     // Reset button
@@ -264,6 +268,11 @@ function loadSettingsToUI(): void {
     (document.getElementById('crosshairStyle') as HTMLInputElement).value = chartConfig.get('crosshair.style');
 
     (document.getElementById('lastPriceEnabled') as HTMLInputElement).checked = chartConfig.get('lastPrice.enabled');
+
+    (document.getElementById('indicatorsEnabled') as HTMLInputElement).checked = chartConfig.get('indicators.enabled');
+    (document.getElementById('indicatorsHeight') as HTMLInputElement).value = chartConfig.get('indicators.heightPercent');
+    document.getElementById('indicatorsHeightValue').textContent = chartConfig.get('indicators.heightPercent');
+    (document.getElementById('rsiOverlay') as HTMLInputElement).checked = chartConfig.get('indicators.rsi.overlay');
 
     (document.getElementById('theme') as HTMLInputElement).value = chartConfig.get('colors.theme');
 }
@@ -308,9 +317,10 @@ function applyThemeChange(theme: 'light' | 'dark'): void {
     refreshChart();
 }
 
-function refreshChart(): void {
+async function refreshChart(): Promise<void> {
     if (app.chart && app.currentPair) {
         app.chart.updateTheme();
+        await app.chart.loadIndicatorData();
         app.chart.renderBackground();
         app.chart.render();
     }

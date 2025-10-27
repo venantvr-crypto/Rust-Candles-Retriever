@@ -19,6 +19,9 @@ export class ChartEngine {
     callbacks: ChartCallbacks;
     theme: ThemeColors;
     layout: ChartLayout;
+    rsiData: Map<string, any[]>;
+    rsiVisibility: Map<string, boolean>;
+    legendContainer: HTMLDivElement;
 
     constructor(container: HTMLElement, options: ChartOptions = {}) {
         this.container = container;
@@ -37,6 +40,15 @@ export class ChartEngine {
 
         // Configuration timeframes (sera définie par setTimeframes())
         this.timeframes = [];
+
+        // Indicateurs multi-timeframes
+        this.rsiData = new Map();
+        this.rsiVisibility = new Map();
+
+        // Conteneur pour légendes interactives
+        this.legendContainer = document.createElement('div');
+        this.legendContainer.style.cssText = 'position: absolute; bottom: 45px; left: 80px; z-index: 10; pointer-events: auto;';
+        this.container.appendChild(this.legendContainer);
 
         // État du chart
         this.state = {
@@ -130,6 +142,40 @@ export class ChartEngine {
             default:
                 return 86400;
         }
+    }
+
+    calculateRSI(candles, period = 14) {
+        if (candles.length < period + 1) return [];
+
+        const rsi = [];
+        let gains = 0;
+        let losses = 0;
+
+        // Première période
+        for (let i = 1; i <= period; i++) {
+            const change = candles[i].close - candles[i - 1].close;
+            if (change > 0) gains += change;
+            else losses += Math.abs(change);
+        }
+
+        let avgGain = gains / period;
+        let avgLoss = losses / period;
+        let rs = avgGain / avgLoss;
+        rsi.push({time: candles[period].time, value: 100 - (100 / (1 + rs))});
+
+        // Suite
+        for (let i = period + 1; i < candles.length; i++) {
+            const change = candles[i].close - candles[i - 1].close;
+            const gain = change > 0 ? change : 0;
+            const loss = change < 0 ? Math.abs(change) : 0;
+
+            avgGain = (avgGain * (period - 1) + gain) / period;
+            avgLoss = (avgLoss * (period - 1) + loss) / period;
+            rs = avgGain / avgLoss;
+            rsi.push({time: candles[i].time, value: 100 - (100 / (1 + rs))});
+        }
+
+        return rsi;
     }
 
     setTimeframes(timeframes) {
@@ -463,6 +509,8 @@ export class ChartEngine {
                 this.restoreViewFromRange(savedRange);
             }
 
+            await this.loadIndicatorData();
+
             this.renderBackground();
             this.render();
 
@@ -472,6 +520,141 @@ export class ChartEngine {
         } finally {
             this.state.isLoading = false;
         }
+    }
+
+    async loadIndicatorData() {
+        console.log(`📊 loadIndicatorData() called - enabled: ${chartConfig.get('indicators.enabled')}, symbol: ${this.state.symbol}, data: ${this.state.data.length} candles`);
+
+        if (!chartConfig.get('indicators.enabled')) {
+            this.rsiData.clear();
+            return;
+        }
+
+        if (!this.state.symbol || this.state.data.length === 0) {
+            console.warn('⚠️ Cannot load indicators: no symbol or no data');
+            this.rsiData.clear();
+            return;
+        }
+
+        // Clear anciennes données RSI
+        this.rsiData.clear();
+
+        // Auto: TF inférieure, actuelle, et supérieure (max 3)
+        const currentIdx = this.timeframes.indexOf(this.state.currentTimeframe);
+        const rsiTimeframes = [];
+
+        if (currentIdx > 0) {
+            // TF inférieure
+            rsiTimeframes.push(this.timeframes[currentIdx - 1]);
+        }
+
+        // TF actuelle (toujours incluse)
+        rsiTimeframes.push(this.state.currentTimeframe);
+
+        if (currentIdx < this.timeframes.length - 1) {
+            // TF supérieure
+            rsiTimeframes.push(this.timeframes[currentIdx + 1]);
+        }
+
+        console.log(`📊 Current TF: ${this.state.currentTimeframe}, RSI TFs: ${rsiTimeframes.join(', ')}`);
+
+        const period = chartConfig.get('indicators.rsi.period') || 14;
+
+        // Timestamps de référence (candles actuels affichés)
+        const referenceTimestamps = this.state.data.map(c => c.time);
+        console.log(`📊 Reference timestamps: ${referenceTimestamps.length} candles`);
+
+        for (const tf of rsiTimeframes) {
+            try {
+                // Charger avec marge large pour avoir assez de données
+                const margin = (this.state.viewEnd - this.state.viewStart) * 2;
+                console.log(`📊 Loading ${tf} data for RSI (${this.state.symbol})...`);
+                const data = await this.callbacks.onLoadData(
+                    this.state.symbol,
+                    tf,
+                    Math.floor(this.state.viewStart - margin),
+                    Math.ceil(this.state.viewEnd + margin)
+                );
+
+                console.log(`📊 Loaded ${data?.length || 0} candles for ${tf}`);
+
+                if (data && data.length > period) {
+                    const rsi = this.calculateRSI(data, period);
+                    console.log(`📊 Calculated ${rsi.length} RSI points for ${tf}`);
+
+                    // Rééchantillonner: pour chaque timestamp de candle affiché,
+                    // prendre le dernier RSI calculé <= timestamp
+                    const resampled = this.resampleIndicatorToGrid(rsi, referenceTimestamps);
+                    console.log(`📊 Resampled to ${resampled.length} points for ${tf}`);
+                    this.rsiData.set(tf, resampled);
+
+                    // Initialiser visibilité à true par défaut
+                    if (!this.rsiVisibility.has(tf)) {
+                        this.rsiVisibility.set(tf, true);
+                    }
+                } else {
+                    console.warn(`❌ Not enough data for RSI on ${tf}: ${data?.length || 0} candles (need > ${period})`);
+                }
+            } catch (e) {
+                console.error(`❌ Failed to load RSI data for ${tf}:`, e);
+            }
+        }
+
+        console.log(`📊 RSI data loaded for ${this.rsiData.size} timeframes`);
+        this.updateRSILegend();
+    }
+
+    updateRSILegend() {
+        this.legendContainer.innerHTML = '';
+        if (this.rsiData.size === 0 || !chartConfig.get('indicators.enabled')) return;
+
+        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
+        let colorIdx = 0;
+
+        this.rsiData.forEach((data, tf) => {
+            const color = colors[colorIdx++ % colors.length];
+
+            const label = document.createElement('label');
+            label.style.cssText = `display: inline-flex; align-items: center; margin: 0 10px 5px 0; padding: 4px 8px; background: rgba(0,0,0,0.7); border-radius: 4px; font-size: 11px; color: ${color}; cursor: pointer; font-family: monospace;`;
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = this.rsiVisibility.get(tf) || false;
+            checkbox.style.marginRight = '5px';
+            checkbox.style.cursor = 'pointer';
+
+            checkbox.addEventListener('change', () => {
+                this.rsiVisibility.set(tf, checkbox.checked);
+                this.render();
+            });
+
+            label.appendChild(checkbox);
+            label.appendChild(document.createTextNode(`RSI ${tf}`));
+            this.legendContainer.appendChild(label);
+        });
+    }
+
+    resampleIndicatorToGrid(indicatorData, targetTimestamps) {
+        // Trier les données RSI par temps
+        const sorted = [...indicatorData].sort((a, b) => a.time - b.time);
+
+        return targetTimestamps.map(targetTime => {
+            // Trouver le dernier point RSI calculé <= targetTime
+            let lastValid = null;
+
+            for (const point of sorted) {
+                if (point.time <= targetTime) {
+                    lastValid = point;
+                } else {
+                    break; // Dépassé, inutile de continuer
+                }
+            }
+
+            if (!lastValid) return null;
+
+            // Retourner avec le timestamp de référence (celui du candle affiché)
+            return {time: targetTime, value: lastValid.value};
+        }).filter(p => p !== null);
     }
 
     fitToData() {
@@ -686,6 +869,19 @@ export class ChartEngine {
             }
         });
 
+        // Indicateurs
+        if (chartConfig.get('indicators.enabled') && this.rsiData.size > 0) {
+            console.log(`📊 Rendering ${this.rsiData.size} RSI timeframes`);
+            const overlay = chartConfig.get('indicators.rsi.overlay');
+            if (overlay) {
+                // Ajuster chartH pour exclure le volume
+                const candleChartH = chartH - volumeHeight;
+                this.renderIndicatorsOverlay(chartX, chartY, chartW, candleChartH, timeToX, priceMin, priceMax, priceRange);
+            } else {
+                this.renderIndicatorsSeparate(chartX, chartY, chartW, chartH, w, h, timeToX);
+            }
+        }
+
         // Dessiner axe temps
         this.renderTimeAxis(w, h);
 
@@ -717,6 +913,130 @@ export class ChartEngine {
 
             const barWidth = Math.max(1, chartW / candles.length * 0.8);
             this.mainCtx.fillRect(x - barWidth / 2, y, barWidth, height);
+        });
+    }
+
+    renderIndicatorsOverlay(chartX, chartY, chartW, chartH, timeToX, priceMin, priceMax, priceRange) {
+        if (this.rsiData.size === 0) {
+            console.log('📊 No RSI data to render (overlay mode)');
+            return;
+        }
+        console.log(`📊 Rendering RSI (overlay mode) for ${this.rsiData.size} timeframes`);
+
+        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
+        let colorIdx = 0;
+
+        // RSI: 0-100, on le superpose avec échelle à droite
+        const rsiToY = (value) => {
+            const ratio = value / 100;
+            return chartY + chartH * (1 - ratio);
+        };
+
+        this.mainCtx.save();
+        this.mainCtx.lineWidth = 1.5;
+
+        this.rsiData.forEach((data, tf) => {
+            if (!this.rsiVisibility.get(tf)) return;
+            const color = colors[colorIdx++ % colors.length];
+            this.mainCtx.strokeStyle = color;
+            this.mainCtx.beginPath();
+
+            let first = true;
+            data.forEach(point => {
+                if (point.time >= this.state.viewStart && point.time <= this.state.viewEnd) {
+                    const x = timeToX(point.time);
+                    const y = rsiToY(point.value);
+                    if (first) {
+                        this.mainCtx.moveTo(x, y);
+                        first = false;
+                    } else {
+                        this.mainCtx.lineTo(x, y);
+                    }
+                }
+            });
+
+            this.mainCtx.stroke();
+        });
+
+        // Échelle RSI à droite
+        this.mainCtx.fillStyle = this.theme.textLight;
+        this.mainCtx.font = '10px monospace';
+        this.mainCtx.textAlign = 'left';
+        [30, 50, 70].forEach(level => {
+            const y = rsiToY(level);
+            this.mainCtx.fillText(level.toString(), chartX + chartW + 5, y + 3);
+        });
+
+        this.mainCtx.restore();
+    }
+
+    renderIndicatorsSeparate(chartX, chartY, chartW, chartH, w, h, timeToX) {
+        if (this.rsiData.size === 0) {
+            console.log('📊 No RSI data to render (separate mode)');
+            return;
+        }
+        console.log(`📊 Rendering RSI (separate mode) for ${this.rsiData.size} timeframes`);
+
+        const indicatorHeightPercent = chartConfig.get('indicators.heightPercent') / 100;
+        const indicatorH = h * indicatorHeightPercent;
+        const indicatorY = h - this.layout.marginBottom - indicatorH;
+
+        // Fond
+        this.mainCtx.fillStyle = this.theme.bg === '#ffffff' ? '#f9f9f9' : '#252525';
+        this.mainCtx.fillRect(chartX, indicatorY, chartW, indicatorH);
+
+        // Grille horizontale
+        this.mainCtx.strokeStyle = this.theme.grid;
+        this.mainCtx.lineWidth = 1;
+        this.mainCtx.globalAlpha = 0.3;
+        [30, 50, 70].forEach(level => {
+            const y = indicatorY + indicatorH * (1 - level / 100);
+            this.mainCtx.beginPath();
+            this.mainCtx.moveTo(chartX, y);
+            this.mainCtx.lineTo(chartX + chartW, y);
+            this.mainCtx.stroke();
+        });
+        this.mainCtx.globalAlpha = 1;
+
+        // Échelle gauche
+        this.mainCtx.fillStyle = this.theme.text;
+        this.mainCtx.font = '10px monospace';
+        this.mainCtx.textAlign = 'right';
+        this.mainCtx.textBaseline = 'middle';
+        [0, 30, 50, 70, 100].forEach(level => {
+            const y = indicatorY + indicatorH * (1 - level / 100);
+            this.mainCtx.fillText(level.toString(), chartX - 5, y);
+        });
+
+        // Courbes RSI
+        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
+        let colorIdx = 0;
+
+        const rsiToY = (value) => indicatorY + indicatorH * (1 - value / 100);
+
+        this.mainCtx.lineWidth = 1.5;
+
+        this.rsiData.forEach((data, tf) => {
+            if (!this.rsiVisibility.get(tf)) return;
+            const color = colors[colorIdx++ % colors.length];
+            this.mainCtx.strokeStyle = color;
+            this.mainCtx.beginPath();
+
+            let first = true;
+            data.forEach(point => {
+                if (point.time >= this.state.viewStart && point.time <= this.state.viewEnd) {
+                    const x = timeToX(point.time);
+                    const y = rsiToY(point.value);
+                    if (first) {
+                        this.mainCtx.moveTo(x, y);
+                        first = false;
+                    } else {
+                        this.mainCtx.lineTo(x, y);
+                    }
+                }
+            });
+
+            this.mainCtx.stroke();
         });
     }
 

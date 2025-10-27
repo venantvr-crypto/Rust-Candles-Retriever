@@ -112,6 +112,30 @@
             </label>
         </div>
 
+        <!-- Indicators -->
+        <div class="setting-group">
+            <h4>Technical Indicators</h4>
+            <label>
+                <input type="checkbox" id="indicatorsEnabled"/>
+                Show Indicators Panel
+            </label>
+            <label>
+                Height
+                <input type="range" id="indicatorsHeight" min="20" max="50" step="5"/>
+                <span id="indicatorsHeightValue">30</span>%
+            </label>
+            <div id="rsiSettings" style="margin-top: 10px; padding: 10px; background: rgba(0,0,0,0.05); border-radius: 4px;">
+                <h5 style="margin: 0 0 8px 0; font-size: 13px;">RSI (14)</h5>
+                <label>
+                    <input type="checkbox" id="rsiOverlay"/>
+                    Overlay on candles
+                </label>
+                <div style="margin-top: 8px; font-size: 11px; color: #666;">
+                    Auto: TF inférieure, actuelle, et supérieure (max 3)
+                </div>
+            </div>
+        </div>
+
         <!-- Actions -->
         <div class="setting-group">
             <button class="reset-btn" id="resetConfig">Reset to Defaults</button>
