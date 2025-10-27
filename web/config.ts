@@ -46,6 +46,15 @@ const DEFAULT_CONFIG: Config = {
         lineStyle: 'dashed',
         labelBg: true,
     },
+    indicators: {
+        enabled: false,
+        heightPercent: 30,
+        rsi: {
+            type: 'rsi',
+            period: 14,
+            overlay: false,
+        },
+    },
 };
 
 class ChartConfig {

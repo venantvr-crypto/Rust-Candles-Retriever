@@ -188,6 +188,9 @@ function initSettingsPanel() {
     bindSetting('floatingLabels', 'crosshair.floatingLabels', 'checkbox');
     bindSetting('crosshairStyle', 'crosshair.style', 'select');
     bindSetting('lastPriceEnabled', 'lastPrice.enabled', 'checkbox');
+    bindSetting('indicatorsEnabled', 'indicators.enabled', 'checkbox');
+    bindSetting('indicatorsHeight', 'indicators.heightPercent', 'range', 'indicatorsHeightValue');
+    bindSetting('rsiOverlay', 'indicators.rsi.overlay', 'checkbox');
     bindSetting('theme', 'colors.theme', 'select', null, null, applyThemeChange);
     // Reset button
     reset.addEventListener('click', () => {
@@ -215,6 +218,10 @@ function loadSettingsToUI() {
     document.getElementById('floatingLabels').checked = chartConfig.get('crosshair.floatingLabels');
     document.getElementById('crosshairStyle').value = chartConfig.get('crosshair.style');
     document.getElementById('lastPriceEnabled').checked = chartConfig.get('lastPrice.enabled');
+    document.getElementById('indicatorsEnabled').checked = chartConfig.get('indicators.enabled');
+    document.getElementById('indicatorsHeight').value = chartConfig.get('indicators.heightPercent');
+    document.getElementById('indicatorsHeightValue').textContent = chartConfig.get('indicators.heightPercent');
+    document.getElementById('rsiOverlay').checked = chartConfig.get('indicators.rsi.overlay');
     document.getElementById('theme').value = chartConfig.get('colors.theme');
 }
 function bindSetting(elementId, configPath, type, valueDisplayId = null, transform = null, callback = null) {
@@ -253,9 +260,10 @@ function applyThemeChange(theme) {
         : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
     refreshChart();
 }
-function refreshChart() {
+async function refreshChart() {
     if (app.chart && app.currentPair) {
         app.chart.updateTheme();
+        await app.chart.loadIndicatorData();
         app.chart.renderBackground();
         app.chart.render();
     }

@@ -75,6 +75,17 @@ export interface SavedRange {
     pivotRatio?: number;
 }
 
+export interface IndicatorData {
+    time: number;
+    value: number;
+}
+
+export interface IndicatorConfig {
+    type: 'rsi';
+    period: number;
+    overlay: boolean;
+}
+
 export interface Config {
     candles: {
         hollowUp: boolean;
@@ -120,6 +131,11 @@ export interface Config {
         enabled: boolean;
         lineStyle: 'solid' | 'dashed' | 'dotted';
         labelBg: boolean;
+    };
+    indicators: {
+        enabled: boolean;
+        heightPercent: number;
+        rsi: IndicatorConfig;
     };
 }
 
