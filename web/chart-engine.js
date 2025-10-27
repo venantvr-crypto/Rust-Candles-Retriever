@@ -66,18 +66,9 @@ class ChartEngine {
             onError: options.onError || console.error
         };
 
-        // Style
-        this.theme = {
-            bg: '#ffffff',
-            grid: '#f0f0f0',
-            text: '#333333',
-            textLight: '#999999',
-            crosshair: '#758696',
-            upColor: '#26a69a',
-            downColor: '#ef5350',
-            tooltipBg: 'rgba(255, 255, 255, 0.95)',
-            tooltipBorder: '#cccccc'
-        };
+        // Style (sera mis à jour depuis config)
+        this.theme = {};
+        this.updateTheme();
 
         // Layout
         this.layout = {
@@ -130,6 +121,21 @@ class ChartEngine {
             this.parseTimeframeToSeconds(a) - this.parseTimeframeToSeconds(b)
         );
         console.log(`⚙️ Timeframes configured: ${this.timeframes.join(', ')}`);
+    }
+
+    updateTheme() {
+        const themeColors = chartConfig.getThemeColors();
+        this.theme = {
+            ...themeColors,
+            upColor: chartConfig.get('colors.upColor'),
+            downColor: chartConfig.get('colors.downColor'),
+            upBorderColor: chartConfig.get('colors.upBorderColor'),
+            downBorderColor: chartConfig.get('colors.downBorderColor'),
+            tooltipBg: themeColors.bg === '#ffffff'
+                ? 'rgba(255, 255, 255, 0.95)'
+                : 'rgba(30, 30, 30, 0.95)',
+            tooltipBorder: themeColors.grid
+        };
     }
 
     setupCanvas() {
@@ -463,64 +469,20 @@ class ChartEngine {
     }
 
     restoreViewFromRange(savedRange) {
-        // Calculer combien de bougies on avait dans l'ancienne plage
-        // savedRange contient aussi l'ancien timeframe
+        // Garder EXACTEMENT la même fenêtre temporelle
+        // Les bougies changent mais pas les coordonnées temporelles
+        this.state.viewStart = savedRange.start;
+        this.state.viewEnd = savedRange.end;
+
         const oldTFSeconds = savedRange.oldTFSeconds || this.parseTimeframeToSeconds(this.state.currentTimeframe);
-        const savedWidth = savedRange.end - savedRange.start;
-        const oldBarsCount = savedWidth / oldTFSeconds;
-
-        console.log(`📊 Old view: ${Math.round(oldBarsCount)} bars, new TF: ${this.state.currentTimeframe}`);
-
-        // Calculer la nouvelle largeur pour avoir le MÊME NOMBRE de bougies dans le nouveau TF
-        // IMPORTANT: On ne force PAS les limites min/max ici pour éviter les sauts de dates
-        // Les limites sont seulement appliquées pendant le zoom interactif
         const newTFSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
-        const targetBarsCount = oldBarsCount;  // Garder le même nombre exact de bougies
-        const newWidth = targetBarsCount * newTFSeconds;
+        const savedWidth = savedRange.end - savedRange.start;
 
-        // Si on a un pivot sauvegardé, restaurer autour du pivot
-        // Sinon, restaurer autour du centre de la vue
-        if (savedRange.pivotTime && savedRange.pivotRatio !== null) {
-            // Restaurer en gardant le pivot à la même position relative
-            this.state.viewStart = savedRange.pivotTime - newWidth * savedRange.pivotRatio;
-            this.state.viewEnd = savedRange.pivotTime + newWidth * (1 - savedRange.pivotRatio);
+        const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
+        const newBarsCount = Math.round(savedWidth / newTFSeconds);
 
-            console.log(`✅ Restored view around PIVOT at ${new Date(savedRange.pivotTime * 1000).toISOString().substring(0, 16)} (ratio: ${savedRange.pivotRatio.toFixed(3)})`);
-        } else {
-            // Fallback: centrer autour du centre de la vue
-            const center = (savedRange.start + savedRange.end) / 2;
-            this.state.viewStart = center - newWidth / 2;
-            this.state.viewEnd = center + newWidth / 2;
-
-            console.log(`✅ Restored view centered on ${new Date(center * 1000).toISOString().substring(0, 16)}`);
-        }
-
-        console.log(`   → ${Math.round(targetBarsCount)} bars of ${this.state.currentTimeframe} (${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)})`);
-
-        // Vérifier qu'on a des données dans cette plage
-        const visibleCandles = this.state.data.filter(c =>
-            c.time >= this.state.viewStart && c.time <= this.state.viewEnd
-        );
-
-        if (visibleCandles.length === 0 && this.state.data.length > 0) {
-            // SEULEMENT si vraiment aucune donnée, on ajuste
-            console.log(`⚠️ No data in range, adjusting to nearest available data`);
-
-            const firstTime = this.state.data[0].time;
-            const lastTime = this.state.data[this.state.data.length - 1].time;
-
-            if (this.state.viewEnd < firstTime) {
-                // Toute la plage est avant les données -> montrer le début
-                this.state.viewStart = firstTime;
-                this.state.viewEnd = firstTime + newWidth;
-            } else if (this.state.viewStart > lastTime) {
-                // Toute la plage est après les données -> montrer la fin
-                this.state.viewEnd = lastTime + newTFSeconds;
-                this.state.viewStart = this.state.viewEnd - newWidth;
-            }
-
-            console.log(`   → Adjusted to: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
-        }
+        console.log(`📊 Timeframe change: ${oldBarsCount} bars → ${newBarsCount} bars`);
+        console.log(`   Fixed window: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
     }
 
     renderBackground() {
@@ -540,11 +502,22 @@ class ChartEngine {
         const chartW = w - this.layout.marginLeft - this.layout.marginRight;
         const chartH = h - this.layout.marginTop - this.layout.marginBottom;
 
+        // Grille config
+        const gridOpacity = chartConfig.get('grid.opacity');
+        const gridStyle = chartConfig.get('grid.style');
+
+        // Convertir style en dash array
+        let dashArray = [];
+        if (gridStyle === 'dashed') dashArray = [4, 4];
+        else if (gridStyle === 'dotted') dashArray = [2, 2];
+
         // Grille horizontale (prix)
         this.bgCtx.strokeStyle = this.theme.grid;
+        this.bgCtx.globalAlpha = gridOpacity;
         this.bgCtx.lineWidth = 1;
+        this.bgCtx.setLineDash(dashArray);
 
-        const numLines = 8;
+        const numLines = chartConfig.get('grid.horizontal');
         for (let i = 0; i <= numLines; i++) {
             const y = chartY + (i / numLines) * chartH;
             this.bgCtx.beginPath();
@@ -553,9 +526,8 @@ class ChartEngine {
             this.bgCtx.stroke();
         }
 
-        // Grille verticale (temps) - plus subtile
-        this.bgCtx.strokeStyle = this.theme.grid;
-        const numTimeLines = 6;
+        // Grille verticale (temps)
+        const numTimeLines = chartConfig.get('grid.vertical');
         for (let i = 0; i <= numTimeLines; i++) {
             const x = chartX + (i / numTimeLines) * chartW;
             this.bgCtx.beginPath();
@@ -563,6 +535,31 @@ class ChartEngine {
             this.bgCtx.lineTo(x, chartY + chartH);
             this.bgCtx.stroke();
         }
+
+        this.bgCtx.globalAlpha = 1;
+        this.bgCtx.setLineDash([]);
+
+        // Watermark
+        if (chartConfig.get('watermark.enabled') && this.state.symbol) {
+            this.renderWatermark(w, h);
+        }
+    }
+
+    renderWatermark(w, h) {
+        const opacity = chartConfig.get('watermark.opacity') / 100;
+        const fontSize = chartConfig.get('watermark.fontSize');
+
+        this.bgCtx.save();
+        this.bgCtx.globalAlpha = opacity;
+        this.bgCtx.fillStyle = this.theme.textLight;
+        this.bgCtx.font = `bold ${fontSize}px sans-serif`;
+        this.bgCtx.textAlign = 'center';
+        this.bgCtx.textBaseline = 'middle';
+
+        const text = `${this.state.symbol} ${this.state.currentTimeframe}`;
+        this.bgCtx.fillText(text, w / 2, h / 2);
+
+        this.bgCtx.restore();
     }
 
     render() {
@@ -611,10 +608,25 @@ class ChartEngine {
         // Dessiner labels prix
         this.renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH);
 
+        // Volume (si activé)
+        let volumeHeight = 0;
+        if (chartConfig.get('volume.enabled')) {
+            volumeHeight = chartH * (chartConfig.get('volume.heightPercent') / 100);
+            this.renderVolume(visibleCandles, chartX, chartY, chartW, chartH, volumeHeight, timeToX);
+        }
+
+        // Ajuster hauteur chart pour volume
+        const candleChartH = chartH - volumeHeight;
+
         // Dessiner bougies
         const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
         const candleWidthSeconds = (this.state.viewEnd - this.state.viewStart) / chartW;
         const candleWidth = Math.max(1, Math.min(50, tfSeconds / candleWidthSeconds * 0.8));
+
+        const borderWidth = chartConfig.get('candles.borderWidth');
+        const wickWidth = chartConfig.get('candles.wickWidth');
+        const hollowUp = chartConfig.get('candles.hollowUp');
+        const minBodyHeight = chartConfig.get('candles.minBodyHeight');
 
         visibleCandles.forEach(candle => {
             const x = timeToX(candle.time);
@@ -625,10 +637,11 @@ class ChartEngine {
 
             const isUp = candle.close >= candle.open;
             const color = isUp ? this.theme.upColor : this.theme.downColor;
+            const borderColor = isUp ? this.theme.upBorderColor : this.theme.downBorderColor;
 
             // Mèche
             this.mainCtx.strokeStyle = color;
-            this.mainCtx.lineWidth = Math.max(1, candleWidth * 0.1);
+            this.mainCtx.lineWidth = wickWidth;
             this.mainCtx.beginPath();
             this.mainCtx.moveTo(x, yHigh);
             this.mainCtx.lineTo(x, yLow);
@@ -636,19 +649,105 @@ class ChartEngine {
 
             // Corps
             const bodyTop = Math.min(yOpen, yClose);
-            const bodyHeight = Math.max(1, Math.abs(yClose - yOpen));
+            const bodyHeight = Math.max(minBodyHeight, Math.abs(yClose - yOpen));
 
-            this.mainCtx.fillStyle = color;
-            this.mainCtx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+            // Remplissage (creux si haussier et hollowUp activé)
+            if (isUp && hollowUp) {
+                // Creux: juste bordure
+                if (borderWidth > 0) {
+                    this.mainCtx.strokeStyle = borderColor;
+                    this.mainCtx.lineWidth = borderWidth;
+                    this.mainCtx.strokeRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                }
+            } else {
+                // Plein
+                this.mainCtx.fillStyle = color;
+                this.mainCtx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+
+                // Bordure optionnelle
+                if (borderWidth > 0) {
+                    this.mainCtx.strokeStyle = borderColor;
+                    this.mainCtx.lineWidth = borderWidth;
+                    this.mainCtx.strokeRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                }
+            }
         });
 
         // Dessiner axe temps
         this.renderTimeAxis(w, h);
 
+        // Ligne dernier prix
+        if (chartConfig.get('lastPrice.enabled') && visibleCandles.length > 0) {
+            this.renderLastPriceLine(visibleCandles, chartX, chartW, priceToY);
+        }
+
         // Render overlay si nécessaire
         if (this.state.showCrosshair) {
             this.renderOverlay();
         }
+    }
+
+    renderVolume(candles, chartX, chartY, chartW, chartH, volumeHeight, timeToX) {
+        if (candles.length === 0) return;
+
+        const maxVolume = Math.max(...candles.map(c => c.volume));
+        const volumeY = chartY + chartH - volumeHeight;
+
+        candles.forEach(candle => {
+            const x = timeToX(candle.time);
+            const height = (candle.volume / maxVolume) * volumeHeight * 0.95;
+            const y = chartY + chartH - height;
+
+            const isUp = candle.close >= candle.open;
+            this.mainCtx.fillStyle = isUp
+                ? chartConfig.get('colors.volumeUpColor')
+                : chartConfig.get('colors.volumeDownColor');
+
+            const barWidth = Math.max(1, chartW / candles.length * 0.8);
+            this.mainCtx.fillRect(x - barWidth / 2, y, barWidth, height);
+        });
+    }
+
+    renderLastPriceLine(candles, chartX, chartW, priceToY) {
+        const lastCandle = candles[candles.length - 1];
+        if (!lastCandle) return;
+
+        const y = priceToY(lastCandle.close);
+        const isUp = lastCandle.close >= lastCandle.open;
+        const color = isUp ? this.theme.upColor : this.theme.downColor;
+
+        this.mainCtx.save();
+        this.mainCtx.strokeStyle = color;
+        this.mainCtx.lineWidth = 1;
+
+        const lineStyle = chartConfig.get('lastPrice.lineStyle');
+        if (lineStyle === 'dashed') {
+            this.mainCtx.setLineDash([4, 4]);
+        } else if (lineStyle === 'dotted') {
+            this.mainCtx.setLineDash([2, 2]);
+        }
+
+        this.mainCtx.beginPath();
+        this.mainCtx.moveTo(chartX, y);
+        this.mainCtx.lineTo(chartX + chartW, y);
+        this.mainCtx.stroke();
+
+        // Label
+        if (chartConfig.get('lastPrice.labelBg')) {
+            const text = lastCandle.close.toFixed(2);
+            this.mainCtx.font = '11px monospace';
+            const textWidth = this.mainCtx.measureText(text).width;
+
+            this.mainCtx.fillStyle = color;
+            this.mainCtx.fillRect(chartX + chartW + 5, y - 10, textWidth + 8, 20);
+
+            this.mainCtx.fillStyle = '#ffffff';
+            this.mainCtx.textAlign = 'left';
+            this.mainCtx.textBaseline = 'middle';
+            this.mainCtx.fillText(text, chartX + chartW + 9, y);
+        }
+
+        this.mainCtx.restore();
     }
 
     formatPrice(price, priceStep) {
@@ -689,35 +788,68 @@ class ChartEngine {
     }
 
     renderTimeAxis(w, h) {
-        const viewDurationDays = (this.state.viewEnd - this.state.viewStart) / 86400;
+        const chartX = this.layout.marginLeft;
+        const chartW = w - this.layout.marginLeft - this.layout.marginRight;
+        const viewDuration = this.state.viewEnd - this.state.viewStart;
+        const viewDurationDays = viewDuration / 86400;
 
+        // Déterminer format selon durée
         let formatFn;
+        let estimatedLabelWidth;
+
         if (viewDurationDays < 1) {
+            // Moins d'un jour: HH:MM
             formatFn = (ts) => new Date(ts * 1000).toISOString().substring(11, 16);
+            estimatedLabelWidth = 40;
         } else if (viewDurationDays < 30) {
+            // Moins d'un mois: MM-DD HH:MM
+            formatFn = (ts) => {
+                const date = new Date(ts * 1000);
+                const iso = date.toISOString();
+                return `${iso.substring(5, 10)} ${iso.substring(11, 16)}`;
+            };
+            estimatedLabelWidth = 80;
+        } else if (viewDurationDays < 365) {
+            // Moins d'un an: MM-DD
             formatFn = (ts) => new Date(ts * 1000).toISOString().substring(5, 10);
+            estimatedLabelWidth = 45;
         } else {
+            // Plus d'un an: YYYY-MM-DD
             formatFn = (ts) => new Date(ts * 1000).toISOString().substring(0, 10);
+            estimatedLabelWidth = 70;
         }
+
+        // Calculer nombre de labels possibles sans chevauchement
+        const minSpacing = estimatedLabelWidth + 10; // Espace minimum entre labels
+        const maxLabels = Math.floor(chartW / minSpacing);
+        const numLabels = Math.max(3, Math.min(maxLabels, 12)); // Entre 3 et 12 labels
 
         this.mainCtx.fillStyle = this.theme.text;
         this.mainCtx.font = '11px sans-serif';
+        this.mainCtx.textAlign = 'center';
         this.mainCtx.textBaseline = 'top';
 
         const y = h - this.layout.marginBottom + 10;
-        const centerTime = (this.state.viewStart + this.state.viewEnd) / 2;
 
-        // Gauche
-        this.mainCtx.textAlign = 'left';
-        this.mainCtx.fillText(formatFn(this.state.viewStart), this.layout.marginLeft + 5, y);
+        // Générer les timestamps à intervalles réguliers
+        for (let i = 0; i <= numLabels; i++) {
+            const ratio = i / numLabels;
+            const timestamp = this.state.viewStart + ratio * viewDuration;
+            const x = chartX + ratio * chartW;
 
-        // Centre
-        this.mainCtx.textAlign = 'center';
-        this.mainCtx.fillText(formatFn(centerTime), w / 2, y);
+            // Dessiner tick vertical
+            this.mainCtx.strokeStyle = this.theme.grid;
+            this.mainCtx.globalAlpha = 0.3;
+            this.mainCtx.lineWidth = 1;
+            this.mainCtx.beginPath();
+            this.mainCtx.moveTo(x, y - 5);
+            this.mainCtx.lineTo(x, y);
+            this.mainCtx.stroke();
+            this.mainCtx.globalAlpha = 1;
 
-        // Droite
-        this.mainCtx.textAlign = 'right';
-        this.mainCtx.fillText(formatFn(this.state.viewEnd), w - this.layout.marginRight - 5, y);
+            // Dessiner label
+            this.mainCtx.fillText(formatFn(timestamp), x, y + 2);
+        }
     }
 
     renderOverlay() {
@@ -731,10 +863,18 @@ class ChartEngine {
         const chartW = rect.width - this.layout.marginLeft - this.layout.marginRight;
         const chartH = rect.height - this.layout.marginTop - this.layout.marginBottom;
 
+        // Crosshair config
+        const crosshairStyle = chartConfig.get('crosshair.style');
+        const crosshairWidth = chartConfig.get('crosshair.width');
+
+        let dashArray = [];
+        if (crosshairStyle === 'dashed') dashArray = [4, 4];
+        else if (crosshairStyle === 'dotted') dashArray = [2, 2];
+
         // Crosshair lines
         this.overlayCtx.strokeStyle = this.theme.crosshair;
-        this.overlayCtx.lineWidth = 1;
-        this.overlayCtx.setLineDash([4, 4]);
+        this.overlayCtx.lineWidth = crosshairWidth;
+        this.overlayCtx.setLineDash(dashArray);
 
         // Vertical
         this.overlayCtx.beginPath();
@@ -750,10 +890,59 @@ class ChartEngine {
 
         this.overlayCtx.setLineDash([]);
 
+        // Floating labels
+        if (chartConfig.get('crosshair.floatingLabels')) {
+            this.renderFloatingLabels(chartX, chartY, chartW, chartH);
+        }
+
         // Tooltip si bougie trouvée
         if (this.state.crosshairCandle) {
             this.renderTooltip(this.state.crosshairCandle);
         }
+    }
+
+    renderFloatingLabels(chartX, chartY, chartW, chartH) {
+        // Label prix (Y)
+        if (this.state.data.length > 0) {
+            // Utiliser la plage de prix visible
+            const visibleCandles = this.state.data.filter(c =>
+                c.time >= this.state.viewStart && c.time <= this.state.viewEnd
+            );
+
+            if (visibleCandles.length > 0) {
+                const visiblePrices = visibleCandles.flatMap(c => [c.high, c.low]);
+                const priceMin = Math.min(...visiblePrices);
+                const priceMax = Math.max(...visiblePrices);
+                const priceRange = priceMax - priceMin;
+                const padding = priceRange * 0.05;
+
+                const mouseYRatio = (this.state.mouseY - chartY) / chartH;
+                const price = (priceMax + padding) - mouseYRatio * (priceRange + 2 * padding);
+
+                this.overlayCtx.fillStyle = this.theme.crosshair;
+                this.overlayCtx.fillRect(chartX - 60, this.state.mouseY - 10, 55, 20);
+
+                this.overlayCtx.fillStyle = '#ffffff';
+                this.overlayCtx.font = '11px monospace';
+                this.overlayCtx.textAlign = 'right';
+                this.overlayCtx.textBaseline = 'middle';
+                this.overlayCtx.fillText(price.toFixed(2), chartX - 8, this.state.mouseY);
+            }
+        }
+
+        // Label temps (X)
+        const mouseXRatio = (this.state.mouseX - chartX) / chartW;
+        const timestamp = this.state.viewStart + mouseXRatio * (this.state.viewEnd - this.state.viewStart);
+        const timeStr = new Date(timestamp * 1000).toISOString().substring(11, 16);
+
+        this.overlayCtx.fillStyle = this.theme.crosshair;
+        this.overlayCtx.fillRect(this.state.mouseX - 25, chartY + chartH + 5, 50, 20);
+
+        this.overlayCtx.fillStyle = '#ffffff';
+        this.overlayCtx.font = '11px sans-serif';
+        this.overlayCtx.textAlign = 'center';
+        this.overlayCtx.textBaseline = 'top';
+        this.overlayCtx.fillText(timeStr, this.state.mouseX, chartY + chartH + 10);
     }
 
     renderTooltip(candle) {

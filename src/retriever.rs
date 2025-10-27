@@ -47,12 +47,12 @@ impl<'a> CandleRetriever<'a> {
     ///
     /// RETOUR: (nombre_insertions_reelles, is_exhausted)
     /// - nombre_insertions_reelles: nouvelles bougies insérées (pas les doublons)
-    /// - is_exhausted: true si le timeframe est épuisé (plus de données ou limite atteinte)
+    /// - is_exhausted: true si le timeframe est épuisé (toutes les bougies déjà en base)
     pub fn fetch_one_batch(&mut self) -> Result<(i64, bool)> {
-        // Déterminer le point de départ (mode reprise)
+        // Déterminer le point de départ (dernière bougie stockée ou maintenant)
         let end_time_ms = self.determine_start_point()?;
 
-        // Récupérer le batch depuis l'API
+        // Récupérer le batch depuis l'API (TOUJOURS en backward)
         let klines = match self.fetch_batch(end_time_ms) {
             Ok(k) => k,
             Err(e) => {
@@ -67,6 +67,7 @@ impl<'a> CandleRetriever<'a> {
         }
 
         let oldest_kline_time = klines[0].open_time;
+        let newest_kline_time = klines[klines.len() - 1].open_time;
 
         // Insérer le batch
         let inserted = self.insert_batch(&klines)?;
@@ -87,24 +88,27 @@ impl<'a> CandleRetriever<'a> {
             self.symbol,
             self.timeframe,
             oldest_kline_time,
-            end_time_ms,
+            newest_kline_time,
         );
 
-        // Vérifier si on a atteint la date limite utilisateur
-        let is_date_limit_reached = self.is_date_limit_reached(oldest_kline_time);
+        // Épuisé si: aucune insertion (tout déjà en base) OU date limite atteinte
+        let is_exhausted = inserted == 0 || self.is_date_limit_reached(oldest_kline_time);
 
-        Ok((inserted, is_date_limit_reached))
+        Ok((inserted, is_exhausted))
     }
 
-    /// Détermine le point de départ (mode reprise ou première exécution)
+    /// Détermine le point de départ (dernière bougie stockée ou maintenant)
     fn determine_start_point(&self) -> Result<i64> {
         let last_stored =
             TimeframeStatus::get_last_candle_time(self.conn, PROVIDER, self.symbol, self.timeframe);
 
         let end_time_ms = match last_stored {
-            Some(last_time) => last_time, // Mode reprise
+            Some(last_time) => {
+                // Mode reprise: continuer depuis la dernière bougie
+                last_time
+            }
             None => {
-                // Mode première exécution
+                // Mode première exécution: partir de maintenant
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64
             }
         };
@@ -112,7 +116,7 @@ impl<'a> CandleRetriever<'a> {
         Ok(end_time_ms)
     }
 
-    /// Récupère un batch de bougies depuis l'API Binance
+    /// Récupère un batch de bougies depuis l'API Binance (TOUJOURS en backward)
     fn fetch_batch(&self, end_time_ms: i64) -> Result<Vec<binance::model::KlineSummary>> {
         let klines_data = self
             .market
@@ -125,9 +129,15 @@ impl<'a> CandleRetriever<'a> {
             )
             .map_err(|e| anyhow::anyhow!("Erreur API Binance: {:?}", e))?;
 
-        let klines = match klines_data {
+        let mut klines = match klines_data {
             KlineSummaries::AllKlineSummaries(vec) => vec,
         };
+
+        // IMPORTANT: Filtrer les bougies incomplètes (en cours de formation)
+        // Une bougie est complète si son close_time est dans le passé
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+
+        klines.retain(|k| k.close_time < now_ms);
 
         Ok(klines)
     }

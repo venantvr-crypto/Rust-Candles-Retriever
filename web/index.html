@@ -7,6 +7,120 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div class="settings-panel" id="settingsPanel">
+    <div class="settings-header">
+        <h3>Chart Settings</h3>
+        <button class="close-btn" id="closeSettings">×</button>
+    </div>
+    <div class="settings-content">
+        <!-- Candles -->
+        <div class="setting-group">
+            <h4>Candles</h4>
+            <label>
+                <input type="checkbox" id="hollowUp"/>
+                Hollow Up Candles
+            </label>
+            <label>
+                Border Width
+                <input type="range" id="borderWidth" min="0" max="3" step="1"/>
+                <span id="borderWidthValue">1</span>px
+            </label>
+            <label>
+                Wick Width
+                <input type="range" id="wickWidth" min="1" max="3" step="1"/>
+                <span id="wickWidthValue">1</span>px
+            </label>
+        </div>
+
+        <!-- Volume -->
+        <div class="setting-group">
+            <h4>Volume</h4>
+            <label>
+                <input type="checkbox" id="volumeEnabled"/>
+                Show Volume
+            </label>
+            <label>
+                Height
+                <input type="range" id="volumeHeight" min="10" max="40" step="5"/>
+                <span id="volumeHeightValue">20</span>%
+            </label>
+        </div>
+
+        <!-- Watermark -->
+        <div class="setting-group">
+            <h4>Watermark</h4>
+            <label>
+                <input type="checkbox" id="watermarkEnabled"/>
+                Show Watermark
+            </label>
+            <label>
+                Opacity
+                <input type="range" id="watermarkOpacity" min="0" max="20" step="1"/>
+                <span id="watermarkOpacityValue">5</span>%
+            </label>
+        </div>
+
+        <!-- Grid -->
+        <div class="setting-group">
+            <h4>Grid</h4>
+            <label>
+                Horizontal Lines
+                <input type="range" id="gridHorizontal" min="4" max="16" step="2"/>
+                <span id="gridHorizontalValue">8</span>
+            </label>
+            <label>
+                Opacity
+                <input type="range" id="gridOpacity" min="0" max="100" step="10"/>
+                <span id="gridOpacityValue">50</span>%
+            </label>
+        </div>
+
+        <!-- Crosshair -->
+        <div class="setting-group">
+            <h4>Crosshair</h4>
+            <label>
+                <input type="checkbox" id="floatingLabels"/>
+                Floating Labels
+            </label>
+            <label>
+                Style
+                <select id="crosshairStyle">
+                    <option value="solid">Solid</option>
+                    <option value="dashed">Dashed</option>
+                    <option value="dotted">Dotted</option>
+                </select>
+            </label>
+        </div>
+
+        <!-- Theme -->
+        <div class="setting-group">
+            <h4>Theme</h4>
+            <label>
+                <select id="theme">
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                </select>
+            </label>
+        </div>
+
+        <!-- Last Price -->
+        <div class="setting-group">
+            <h4>Last Price Line</h4>
+            <label>
+                <input type="checkbox" id="lastPriceEnabled"/>
+                Show Last Price
+            </label>
+        </div>
+
+        <!-- Actions -->
+        <div class="setting-group">
+            <button class="reset-btn" id="resetConfig">Reset to Defaults</button>
+        </div>
+    </div>
+</div>
+
+<button class="settings-toggle" id="settingsToggle">⚙️</button>
+
 <div class="container">
     <div class="header">
         <div class="title">
@@ -50,6 +164,7 @@
     </div>
 </div>
 
+<script src="config.js"></script>
 <script src="chart-engine.js"></script>
 <script src="app.js"></script>
 </body>
