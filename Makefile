@@ -99,7 +99,7 @@ db-shell: ## Ouvre un shell SQLite
 web: ## Lance le serveur web (port 8080)
 	@echo "$(GREEN)Arrêt du serveur web existant (si actif)...$(NC)"
 	-@pkill -f web_server 2>/dev/null
-	-@fuser -k 8080/tcp 2>/dev/null
+	# -@fuser -k 8080/tcp 2>/dev/null
 	@sleep 1
 	@echo "$(GREEN)Compilation TypeScript...$(NC)"
 	@cd web && npx tsc
