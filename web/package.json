@@ -1,0 +1,13 @@
+{
+  "name": "rust-candles-viewer",
+  "version": "1.0.0",
+  "description": "Candlestick chart viewer with TypeScript",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
