@@ -49,7 +49,8 @@ export class ChartEngine {
         // Callbacks
         this.callbacks = {
             onLoadData: options.onLoadData || (async () => []),
-            onTimeframeChange: options.onTimeframeChange || (async () => { }),
+            onTimeframeChange: options.onTimeframeChange || (async () => {
+            }),
             onError: options.onError || console.error
         };
         // Style (sera mis à jour depuis config)
@@ -509,8 +510,6 @@ export class ChartEngine {
             volumeHeight = chartH * (chartConfig.get('volume.heightPercent') / 100);
             this.renderVolume(visibleCandles, chartX, chartY, chartW, chartH, volumeHeight, timeToX);
         }
-        // Ajuster hauteur chart pour volume
-        const candleChartH = chartH - volumeHeight;
         // Dessiner bougies
         const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
         const candleWidthSeconds = (this.state.viewEnd - this.state.viewStart) / chartW;
@@ -574,7 +573,6 @@ export class ChartEngine {
         if (candles.length === 0)
             return;
         const maxVolume = Math.max(...candles.map(c => c.volume));
-        const volumeY = chartY + chartH - volumeHeight;
         candles.forEach(candle => {
             const x = timeToX(candle.time);
             const height = (candle.volume / maxVolume) * volumeHeight * 0.95;
@@ -643,7 +641,6 @@ export class ChartEngine {
         }
     }
     renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH) {
-        const rect = this.container.getBoundingClientRect();
         this.mainCtx.fillStyle = this.theme.text;
         this.mainCtx.font = '11px monospace';
         this.mainCtx.textAlign = 'right';

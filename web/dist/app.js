@@ -226,12 +226,11 @@ function bindSetting(elementId, configPath, type, valueDisplayId = null, transfo
         }
         else if (type === 'range') {
             value = parseFloat(e.target.value);
+            if (valueDisplayId) {
+                document.getElementById(valueDisplayId).textContent = e.target.value;
+            }
             if (transform)
                 value = transform(value);
-            if (valueDisplayId) {
-                const displayValue = transform ? e.target.value : value;
-                document.getElementById(valueDisplayId).textContent = displayValue;
-            }
         }
         else {
             value = e.target.value;

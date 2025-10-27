@@ -1,4 +1,4 @@
-import {Candle, ChartState, ThemeColors, ChartLayout, ChartCallbacks, ChartOptions, SavedRange} from './types.js';
+import {ChartState, ThemeColors, ChartLayout, ChartCallbacks, ChartOptions} from './types.js';
 import {chartConfig} from './config.js';
 
 /**
@@ -631,9 +631,6 @@ export class ChartEngine {
             this.renderVolume(visibleCandles, chartX, chartY, chartW, chartH, volumeHeight, timeToX);
         }
 
-        // Ajuster hauteur chart pour volume
-        const candleChartH = chartH - volumeHeight;
-
         // Dessiner bougies
         const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
         const candleWidthSeconds = (this.state.viewEnd - this.state.viewStart) / chartW;
@@ -707,7 +704,6 @@ export class ChartEngine {
         if (candles.length === 0) return;
 
         const maxVolume = Math.max(...candles.map(c => c.volume));
-        const volumeY = chartY + chartH - volumeHeight;
 
         candles.forEach(candle => {
             const x = timeToX(candle.time);
@@ -785,8 +781,6 @@ export class ChartEngine {
     }
 
     renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH) {
-        const rect = this.container.getBoundingClientRect();
-
         this.mainCtx.fillStyle = this.theme.text;
         this.mainCtx.font = '11px monospace';
         this.mainCtx.textAlign = 'right';

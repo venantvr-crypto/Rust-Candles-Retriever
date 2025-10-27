@@ -278,11 +278,10 @@ function bindSetting(elementId: string, configPath: string, type: string, valueD
             value = e.target.checked;
         } else if (type === 'range') {
             value = parseFloat(e.target.value);
-            if (transform) value = transform(value);
             if (valueDisplayId) {
-                const displayValue = transform ? e.target.value : value;
-                document.getElementById(valueDisplayId).textContent = displayValue;
+                document.getElementById(valueDisplayId).textContent = e.target.value;
             }
+            if (transform) value = transform(value);
         } else {
             value = e.target.value;
         }
