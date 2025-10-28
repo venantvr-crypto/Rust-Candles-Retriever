@@ -1,6 +1,6 @@
-import {Candle, PairInfo, AppState} from './types.js';
-import {ChartEngine} from './chart-engine.js';
-import {chartConfig} from './config.js';
+import {Candle, PairInfo, AppState} from './types';
+import {ChartEngine} from './chart-engine';
+import {chartConfig} from './config';
 
 /**
  * Application de trading avec ChartEngine
@@ -21,14 +21,14 @@ const app: AppState = {
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('🚀 Initializing Chart Engine v2...');
     initSettingsPanel();
-    initChart();
+    await initChart();
     await loadPairs();
 });
 
-function initChart(): void {
+async function initChart(): Promise<void> {
     const container = document.getElementById('chart')!;
 
-    app.chart = new ChartEngine(container, {
+    app.chart = await ChartEngine.create(container, {
         onLoadData: async (symbol, timeframe, start, end) => {
             return await fetchCandles(symbol, timeframe, start, end);
         },
@@ -206,6 +206,17 @@ function initSettingsPanel(): void {
     close.addEventListener('click', () => {
         panel.classList.remove('open');
         toggle.classList.remove('hidden');
+    });
+
+    // Close panel when clicking outside
+    document.addEventListener('click', (e: any) => {
+        if (panel.classList.contains('open')) {
+            const target = e.target;
+            if (!panel.contains(target) && target !== toggle) {
+                panel.classList.remove('open');
+                toggle.classList.remove('hidden');
+            }
+        }
     });
 
     // Load current values into UI

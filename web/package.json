@@ -3,11 +3,15 @@
   "version": "1.0.0",
   "description": "Candlestick chart viewer with TypeScript",
   "scripts": {
-    "build": "tsc",
-    "watch": "tsc --watch",
+    "build": "esbuild app.ts --bundle --outfile=dist/app.js --format=esm --sourcemap",
+    "watch": "esbuild app.ts --bundle --outfile=dist/app.js --format=esm --sourcemap --watch",
     "clean": "rm -rf dist"
   },
   "devDependencies": {
+    "esbuild": "^0.25.11",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "pixi.js": "^8.14.0"
   }
 }

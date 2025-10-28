@@ -1,20 +1,64 @@
 import { chartConfig } from './config.js';
+import * as PIXI from 'pixi.js';
 /**
- * ChartEngine - Moteur de rendu de chandelier haute performance
+ * ChartEngine - Moteur de rendu de chandelier haute performance avec WebGL (PixiJS)
  * Architecture: MVC pattern pour séparation des responsabilités
  */
 export class ChartEngine {
     constructor(container, options = {}) {
         this.container = container;
-        // Canvases en couches pour performance optimale
-        this.bgCanvas = document.createElement('canvas');
-        this.mainCanvas = document.createElement('canvas');
+        // Application PixiJS avec WebGL
+        this.app = new PIXI.Application({
+            width: container.clientWidth,
+            height: container.clientHeight,
+            backgroundColor: 0xffffff,
+            antialias: true,
+            resolution: window.devicePixelRatio || 1,
+            autoDensity: true
+        });
+        // Ajouter le canvas PixiJS au conteneur
+        const pixiCanvas = this.app.view;
+        pixiCanvas.style.position = 'absolute';
+        pixiCanvas.style.left = '0';
+        pixiCanvas.style.top = '0';
+        this.container.appendChild(pixiCanvas);
+        // Créer les couches (layers) pour le rendu PixiJS
+        this.bgLayer = new PIXI.Container();
+        this.mainLayer = new PIXI.Container();
+        this.overlayLayer = new PIXI.Container();
+        this.app.stage.addChild(this.bgLayer);
+        this.app.stage.addChild(this.mainLayer);
+        this.app.stage.addChild(this.overlayLayer);
+        // Canvas 2D overlay pour UI elements (axes, labels, crosshair)
         this.overlayCanvas = document.createElement('canvas');
-        this.bgCtx = this.bgCanvas.getContext('2d');
-        this.mainCtx = this.mainCanvas.getContext('2d');
+        this.overlayCanvas.style.position = 'absolute';
+        this.overlayCanvas.style.left = '0';
+        this.overlayCanvas.style.top = '0';
+        this.overlayCanvas.style.pointerEvents = 'all';
         this.overlayCtx = this.overlayCanvas.getContext('2d');
-        // Stack les canvases
-        this.setupCanvasLayers();
+        this.container.appendChild(this.overlayCanvas);
+        // Stub pour compatibilité
+        this.mainCtx = {
+            clearRect: () => { },
+            fillStyle: '',
+            strokeStyle: '',
+            fillRect: () => { },
+            strokeRect: () => { },
+            beginPath: () => { },
+            moveTo: () => { },
+            lineTo: () => { },
+            stroke: () => { },
+            fill: () => { },
+            save: () => { },
+            restore: () => { },
+            lineWidth: 1,
+            globalAlpha: 1,
+            font: '',
+            textAlign: '',
+            textBaseline: '',
+            fillText: () => { }
+        };
+        this.setupCanvasSizes();
         // Configuration timeframes (sera définie par setTimeframes())
         this.timeframes = [];
         // Indicateurs multi-timeframes
@@ -70,21 +114,10 @@ export class ChartEngine {
             marginTop: 15,
             marginBottom: 40
         };
-        this.setupCanvas();
+        // Configurer les événements souris/tactile
         this.setupEvents();
         // Rendu initial
         this.renderBackground();
-    }
-    setupCanvasLayers() {
-        [this.bgCanvas, this.mainCanvas, this.overlayCanvas].forEach((canvas, i) => {
-            canvas.style.position = 'absolute';
-            canvas.style.left = '0';
-            canvas.style.top = '0';
-            canvas.style.width = '100%';
-            canvas.style.height = '100%';
-            canvas.style.pointerEvents = i === 2 ? 'all' : 'none'; // Seul overlay capture les events
-            this.container.appendChild(canvas);
-        });
     }
     parseTimeframeToSeconds(tf) {
         const match = tf.match(/^(\d+)([mhd])$/);
@@ -151,28 +184,30 @@ export class ChartEngine {
             tooltipBorder: themeColors.grid
         };
     }
-    setupCanvas() {
+    setupCanvasSizes() {
         const rect = this.container.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
-        [this.bgCanvas, this.mainCanvas, this.overlayCanvas].forEach(canvas => {
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
-        });
-        [this.bgCtx, this.mainCtx, this.overlayCtx].forEach(ctx => {
-            ctx.scale(dpr, dpr);
-        });
+        this.overlayCanvas.width = rect.width * dpr;
+        this.overlayCanvas.height = rect.height * dpr;
+        this.overlayCanvas.style.width = rect.width + 'px';
+        this.overlayCanvas.style.height = rect.height + 'px';
+        this.overlayCtx.scale(dpr, dpr);
+    }
+    resizeCanvas() {
+        const rect = this.container.getBoundingClientRect();
+        this.app.renderer.resize(rect.width, rect.height);
+        this.setupCanvasSizes();
     }
     setupEvents() {
+        const canvas = this.app.view;
         // Wheel zoom
-        this.overlayCanvas.addEventListener('wheel', (e) => this.handleWheel(e));
+        canvas.addEventListener('wheel', (e) => this.handleWheel(e));
         // Mouse tracking
-        this.overlayCanvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
-        this.overlayCanvas.addEventListener('mouseleave', () => this.handleMouseLeave());
+        canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
+        canvas.addEventListener('mouseleave', () => this.handleMouseLeave());
         // Drag pan
-        this.overlayCanvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
-        this.overlayCanvas.addEventListener('mouseup', () => this.handleMouseUp());
+        canvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
+        canvas.addEventListener('mouseup', () => this.handleMouseUp());
         // Resize
         window.addEventListener('resize', () => this.handleResize());
     }
@@ -294,7 +329,7 @@ export class ChartEngine {
         this.render();
     }
     handleResize() {
-        this.setupCanvas();
+        this.resizeCanvas();
         this.renderBackground();
         this.render();
     }
@@ -550,13 +585,17 @@ export class ChartEngine {
         console.log(`   Fixed window: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
     }
     renderBackground() {
-        const rect = this.container.getBoundingClientRect();
-        const w = rect.width;
-        const h = rect.height;
-        this.bgCtx.clearRect(0, 0, w, h);
+        const w = this.app.screen.width;
+        const h = this.app.screen.height;
+        // Nettoyer le layer de fond
+        this.bgLayer.removeChildren();
         // Fond
-        this.bgCtx.fillStyle = this.theme.bg;
-        this.bgCtx.fillRect(0, 0, w, h);
+        const bgColor = this.theme.bg === '#ffffff' ? 0xffffff : parseInt(this.theme.bg.replace('#', ''), 16);
+        const bg = new PIXI.Graphics();
+        bg.beginFill(bgColor);
+        bg.drawRect(0, 0, w, h);
+        bg.endFill();
+        this.bgLayer.addChild(bg);
         // Zone du chart
         const chartX = this.layout.marginLeft;
         const chartY = this.layout.marginTop;
@@ -564,37 +603,24 @@ export class ChartEngine {
         const chartH = h - this.layout.marginTop - this.layout.marginBottom;
         // Grille config
         const gridOpacity = chartConfig.get('grid.opacity');
-        const gridStyle = chartConfig.get('grid.style');
-        // Convertir style en dash array
-        let dashArray = [];
-        if (gridStyle === 'dashed')
-            dashArray = [4, 4];
-        else if (gridStyle === 'dotted')
-            dashArray = [2, 2];
+        const gridColor = parseInt(this.theme.grid.replace('#', ''), 16);
+        const grid = new PIXI.Graphics();
+        grid.lineStyle(1, gridColor, gridOpacity);
         // Grille horizontale (prix)
-        this.bgCtx.strokeStyle = this.theme.grid;
-        this.bgCtx.globalAlpha = gridOpacity;
-        this.bgCtx.lineWidth = 1;
-        this.bgCtx.setLineDash(dashArray);
         const numLines = chartConfig.get('grid.horizontal');
         for (let i = 0; i <= numLines; i++) {
             const y = chartY + (i / numLines) * chartH;
-            this.bgCtx.beginPath();
-            this.bgCtx.moveTo(chartX, y);
-            this.bgCtx.lineTo(chartX + chartW, y);
-            this.bgCtx.stroke();
+            grid.moveTo(chartX, y);
+            grid.lineTo(chartX + chartW, y);
         }
         // Grille verticale (temps)
         const numTimeLines = chartConfig.get('grid.vertical');
         for (let i = 0; i <= numTimeLines; i++) {
             const x = chartX + (i / numTimeLines) * chartW;
-            this.bgCtx.beginPath();
-            this.bgCtx.moveTo(x, chartY);
-            this.bgCtx.lineTo(x, chartY + chartH);
-            this.bgCtx.stroke();
+            grid.moveTo(x, chartY);
+            grid.lineTo(x, chartY + chartH);
         }
-        this.bgCtx.globalAlpha = 1;
-        this.bgCtx.setLineDash([]);
+        this.bgLayer.addChild(grid);
         // Watermark
         if (chartConfig.get('watermark.enabled') && this.state.symbol) {
             this.renderWatermark(w, h);
@@ -603,23 +629,27 @@ export class ChartEngine {
     renderWatermark(w, h) {
         const opacity = chartConfig.get('watermark.opacity') / 100;
         const fontSize = chartConfig.get('watermark.fontSize');
-        this.bgCtx.save();
-        this.bgCtx.globalAlpha = opacity;
-        this.bgCtx.fillStyle = this.theme.textLight;
-        this.bgCtx.font = `bold ${fontSize}px sans-serif`;
-        this.bgCtx.textAlign = 'center';
-        this.bgCtx.textBaseline = 'middle';
         const text = `${this.state.symbol} ${this.state.currentTimeframe}`;
-        this.bgCtx.fillText(text, w / 2, h / 2);
-        this.bgCtx.restore();
+        const watermark = new PIXI.Text(text, {
+            fontFamily: 'sans-serif',
+            fontSize: fontSize,
+            fontWeight: 'bold',
+            fill: this.theme.textLight,
+            align: 'center'
+        });
+        watermark.anchor.set(0.5);
+        watermark.x = w / 2;
+        watermark.y = h / 2;
+        watermark.alpha = opacity;
+        this.bgLayer.addChild(watermark);
     }
     render() {
         if (this.state.data.length === 0)
             return;
-        const rect = this.container.getBoundingClientRect();
-        const w = rect.width;
-        const h = rect.height;
-        this.mainCtx.clearRect(0, 0, w, h);
+        const w = this.app.screen.width;
+        const h = this.app.screen.height;
+        // Nettoyer le layer principal (WebGL)
+        this.mainLayer.removeChildren();
         const chartX = this.layout.marginLeft;
         const chartY = this.layout.marginTop;
         const chartW = w - this.layout.marginLeft - this.layout.marginRight;
@@ -661,7 +691,7 @@ export class ChartEngine {
             volumeHeight = chartH * (chartConfig.get('volume.heightPercent') / 100);
             this.renderVolume(visibleCandles, chartX, chartY, chartW, chartH, volumeHeight, timeToX);
         }
-        // Dessiner bougies
+        // Dessiner bougies avec PixiJS
         const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
         const candleWidthSeconds = (this.state.viewEnd - this.state.viewStart) / chartW;
         const candleWidth = Math.max(1, Math.min(50, tfSeconds / candleWidthSeconds * 0.8));
@@ -669,6 +699,7 @@ export class ChartEngine {
         const wickWidth = chartConfig.get('candles.wickWidth');
         const hollowUp = chartConfig.get('candles.hollowUp');
         const minBodyHeight = chartConfig.get('candles.minBodyHeight');
+        const candlesGraphics = new PIXI.Graphics();
         visibleCandles.forEach(candle => {
             const x = timeToX(candle.time);
             const yOpen = priceToY(candle.open);
@@ -676,15 +707,12 @@ export class ChartEngine {
             const yHigh = priceToY(candle.high);
             const yLow = priceToY(candle.low);
             const isUp = candle.close >= candle.open;
-            const color = isUp ? this.theme.upColor : this.theme.downColor;
-            const borderColor = isUp ? this.theme.upBorderColor : this.theme.downBorderColor;
+            const color = parseInt(isUp ? this.theme.upColor.replace('#', '') : this.theme.downColor.replace('#', ''), 16);
+            const borderColor = parseInt(isUp ? this.theme.upBorderColor.replace('#', '') : this.theme.downBorderColor.replace('#', ''), 16);
             // Mèche
-            this.mainCtx.strokeStyle = color;
-            this.mainCtx.lineWidth = wickWidth;
-            this.mainCtx.beginPath();
-            this.mainCtx.moveTo(x, yHigh);
-            this.mainCtx.lineTo(x, yLow);
-            this.mainCtx.stroke();
+            candlesGraphics.lineStyle(wickWidth, color, 1);
+            candlesGraphics.moveTo(x, yHigh);
+            candlesGraphics.lineTo(x, yLow);
             // Corps
             const bodyTop = Math.min(yOpen, yClose);
             const bodyHeight = Math.max(minBodyHeight, Math.abs(yClose - yOpen));
@@ -692,23 +720,23 @@ export class ChartEngine {
             if (isUp && hollowUp) {
                 // Creux: juste bordure
                 if (borderWidth > 0) {
-                    this.mainCtx.strokeStyle = borderColor;
-                    this.mainCtx.lineWidth = borderWidth;
-                    this.mainCtx.strokeRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                    candlesGraphics.lineStyle(borderWidth, borderColor, 1);
+                    candlesGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
                 }
             }
             else {
                 // Plein
-                this.mainCtx.fillStyle = color;
-                this.mainCtx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                candlesGraphics.beginFill(color);
+                candlesGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                candlesGraphics.endFill();
                 // Bordure optionnelle
                 if (borderWidth > 0) {
-                    this.mainCtx.strokeStyle = borderColor;
-                    this.mainCtx.lineWidth = borderWidth;
-                    this.mainCtx.strokeRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                    candlesGraphics.lineStyle(borderWidth, borderColor, 1);
+                    candlesGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
                 }
             }
         });
+        this.mainLayer.addChild(candlesGraphics);
         // Indicateurs
         if (chartConfig.get('indicators.enabled') && this.rsiData.size > 0) {
             console.log(`📊 Rendering ${this.rsiData.size} RSI timeframes`);
@@ -737,17 +765,25 @@ export class ChartEngine {
         if (candles.length === 0)
             return;
         const maxVolume = Math.max(...candles.map(c => c.volume));
+        const volumeGraphics = new PIXI.Graphics();
         candles.forEach(candle => {
             const x = timeToX(candle.time);
             const height = (candle.volume / maxVolume) * volumeHeight * 0.95;
             const y = chartY + chartH - height;
             const isUp = candle.close >= candle.open;
-            this.mainCtx.fillStyle = isUp
+            const colorStr = isUp
                 ? chartConfig.get('colors.volumeUpColor')
                 : chartConfig.get('colors.volumeDownColor');
+            // Convertir rgba/hex en format PixiJS (hex + alpha)
+            const match = colorStr.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+            const color = match ? parseInt(match[1], 16) : 0x26a69a;
+            const alpha = match && match[2] ? parseInt(match[2], 16) / 255 : 0.5;
             const barWidth = Math.max(1, chartW / candles.length * 0.8);
-            this.mainCtx.fillRect(x - barWidth / 2, y, barWidth, height);
+            volumeGraphics.beginFill(color, alpha);
+            volumeGraphics.drawRect(x - barWidth / 2, y, barWidth, height);
+            volumeGraphics.endFill();
         });
+        this.mainLayer.addChild(volumeGraphics);
     }
     renderIndicatorsOverlay(chartX, chartY, chartW, chartH, timeToX, priceMin, priceMax, priceRange) {
         if (this.rsiData.size === 0) {
@@ -762,39 +798,39 @@ export class ChartEngine {
             const ratio = value / 100;
             return chartY + chartH * (1 - ratio);
         };
-        this.mainCtx.save();
-        this.mainCtx.lineWidth = 1.5;
+        const rsiGraphics = new PIXI.Graphics();
         this.rsiData.forEach((data, tf) => {
             if (!this.rsiVisibility.get(tf))
                 return;
-            const color = colors[colorIdx++ % colors.length];
-            this.mainCtx.strokeStyle = color;
-            this.mainCtx.beginPath();
+            const colorStr = colors[colorIdx++ % colors.length];
+            const color = parseInt(colorStr.replace('#', ''), 16);
+            rsiGraphics.lineStyle(1.5, color, 1);
             let first = true;
             data.forEach(point => {
                 if (point.time >= this.state.viewStart && point.time <= this.state.viewEnd) {
                     const x = timeToX(point.time);
                     const y = rsiToY(point.value);
                     if (first) {
-                        this.mainCtx.moveTo(x, y);
+                        rsiGraphics.moveTo(x, y);
                         first = false;
                     }
                     else {
-                        this.mainCtx.lineTo(x, y);
+                        rsiGraphics.lineTo(x, y);
                     }
                 }
             });
-            this.mainCtx.stroke();
         });
-        // Échelle RSI à droite
-        this.mainCtx.fillStyle = this.theme.textLight;
-        this.mainCtx.font = '10px monospace';
-        this.mainCtx.textAlign = 'left';
+        this.mainLayer.addChild(rsiGraphics);
+        // Échelle RSI à droite (Canvas 2D overlay pour UI)
+        this.overlayCtx.save();
+        this.overlayCtx.fillStyle = this.theme.textLight;
+        this.overlayCtx.font = '10px monospace';
+        this.overlayCtx.textAlign = 'left';
         [30, 50, 70].forEach(level => {
             const y = rsiToY(level);
-            this.mainCtx.fillText(`RSI ${level}`, chartX + chartW + 5, y + 3);
+            this.overlayCtx.fillText(`RSI ${level}`, chartX + chartW + 5, y + 3);
         });
-        this.mainCtx.restore();
+        this.overlayCtx.restore();
     }
     renderIndicatorsSeparate(chartX, chartY, chartW, chartH, indicatorH, timeToX) {
         if (this.rsiData.size === 0) {
@@ -804,57 +840,57 @@ export class ChartEngine {
         console.log(`📊 Rendering RSI (separate mode) for ${this.rsiData.size} timeframes`);
         // Positionner le panneau RSI juste en dessous de la zone des prix
         const indicatorY = chartY + chartH + 5;
+        const indicatorGraphics = new PIXI.Graphics();
         // Fond
-        this.mainCtx.fillStyle = this.theme.bg === '#ffffff' ? '#f9f9f9' : '#252525';
-        this.mainCtx.fillRect(chartX, indicatorY, chartW, indicatorH);
+        const bgColor = this.theme.bg === '#ffffff' ? 0xf9f9f9 : 0x252525;
+        indicatorGraphics.beginFill(bgColor);
+        indicatorGraphics.drawRect(chartX, indicatorY, chartW, indicatorH);
+        indicatorGraphics.endFill();
         // Grille horizontale
-        this.mainCtx.strokeStyle = this.theme.grid;
-        this.mainCtx.lineWidth = 1;
-        this.mainCtx.globalAlpha = 0.3;
+        const gridColor = parseInt(this.theme.grid.replace('#', ''), 16);
+        indicatorGraphics.lineStyle(1, gridColor, 0.3);
         [30, 50, 70].forEach(level => {
             const y = indicatorY + indicatorH * (1 - level / 100);
-            this.mainCtx.beginPath();
-            this.mainCtx.moveTo(chartX, y);
-            this.mainCtx.lineTo(chartX + chartW, y);
-            this.mainCtx.stroke();
-        });
-        this.mainCtx.globalAlpha = 1;
-        // Échelle gauche
-        this.mainCtx.fillStyle = this.theme.text;
-        this.mainCtx.font = '10px monospace';
-        this.mainCtx.textAlign = 'right';
-        this.mainCtx.textBaseline = 'middle';
-        [0, 30, 50, 70, 100].forEach(level => {
-            const y = indicatorY + indicatorH * (1 - level / 100);
-            this.mainCtx.fillText(level.toString(), chartX - 5, y);
+            indicatorGraphics.moveTo(chartX, y);
+            indicatorGraphics.lineTo(chartX + chartW, y);
         });
         // Courbes RSI
         const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
         let colorIdx = 0;
         const rsiToY = (value) => indicatorY + indicatorH * (1 - value / 100);
-        this.mainCtx.lineWidth = 1.5;
         this.rsiData.forEach((data, tf) => {
             if (!this.rsiVisibility.get(tf))
                 return;
-            const color = colors[colorIdx++ % colors.length];
-            this.mainCtx.strokeStyle = color;
-            this.mainCtx.beginPath();
+            const colorStr = colors[colorIdx++ % colors.length];
+            const color = parseInt(colorStr.replace('#', ''), 16);
+            indicatorGraphics.lineStyle(1.5, color, 1);
             let first = true;
             data.forEach(point => {
                 if (point.time >= this.state.viewStart && point.time <= this.state.viewEnd) {
                     const x = timeToX(point.time);
                     const y = rsiToY(point.value);
                     if (first) {
-                        this.mainCtx.moveTo(x, y);
+                        indicatorGraphics.moveTo(x, y);
                         first = false;
                     }
                     else {
-                        this.mainCtx.lineTo(x, y);
+                        indicatorGraphics.lineTo(x, y);
                     }
                 }
             });
-            this.mainCtx.stroke();
         });
+        this.mainLayer.addChild(indicatorGraphics);
+        // Échelle gauche (Canvas 2D overlay pour UI)
+        this.overlayCtx.save();
+        this.overlayCtx.fillStyle = this.theme.text;
+        this.overlayCtx.font = '10px monospace';
+        this.overlayCtx.textAlign = 'right';
+        this.overlayCtx.textBaseline = 'middle';
+        [0, 30, 50, 70, 100].forEach(level => {
+            const y = indicatorY + indicatorH * (1 - level / 100);
+            this.overlayCtx.fillText(level.toString(), chartX - 5, y);
+        });
+        this.overlayCtx.restore();
     }
     renderLastPriceLine(candles, chartX, chartW, priceToY) {
         const lastCandle = candles[candles.length - 1];
@@ -1134,6 +1170,8 @@ export class ChartEngine {
     }
     destroy() {
         // Cleanup
-        [this.bgCanvas, this.mainCanvas, this.overlayCanvas].forEach(c => c.remove());
+        this.app.destroy(true, { children: true, texture: true });
+        this.overlayCanvas.remove();
+        this.legendContainer.remove();
     }
 }
