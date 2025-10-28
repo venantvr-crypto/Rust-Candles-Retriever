@@ -379,6 +379,9 @@ export class ChartEngine {
                     console.log(`   ⚠️ Clamped to minWidth, new view: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
                 }
 
+                // Vérifier si on doit recharger plus de données
+                this.checkAndReloadData();
+
                 // Render direct
                 this.render();
             }
@@ -428,6 +431,7 @@ export class ChartEngine {
     handleMouseUp() {
         this.state.isDragging = false;
         this.overlayCanvas.style.cursor = 'crosshair';
+        this.checkAndReloadData();
     }
 
     handleDrag(e) {
@@ -488,6 +492,32 @@ export class ChartEngine {
         }
 
         return false;
+    }
+
+    checkAndReloadData() {
+        if (this.state.isLoading || this.state.data.length === 0) return;
+
+        // Trouver les limites des données chargées
+        const dataStart = this.state.data[0].time;
+        const dataEnd = this.state.data[this.state.data.length - 1].time;
+
+        // Calculer la largeur de vue
+        const viewWidth = this.state.viewEnd - this.state.viewStart;
+        const threshold = viewWidth * 0.5; // Recharger si on est à 50% du bord
+
+        // Vérifier si on s'approche des bords
+        const needsReload =
+            this.state.viewStart < (dataStart + threshold) ||
+            this.state.viewEnd > (dataEnd - threshold);
+
+        if (needsReload) {
+            console.log(`🔄 Reloading data - view approaching data boundaries`);
+            console.log(`   Data range: ${new Date(dataStart * 1000).toISOString().substring(0, 16)} → ${new Date(dataEnd * 1000).toISOString().substring(0, 16)}`);
+            console.log(`   View range: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
+
+            // Recharger avec la vue actuelle (loadData ajoutera automatiquement les marges)
+            this.loadData(this.state.symbol, this.state.currentTimeframe);
+        }
     }
 
     updateCrosshair() {

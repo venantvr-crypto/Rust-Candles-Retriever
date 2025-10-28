@@ -43033,6 +43033,7 @@ var ChartEngine = class _ChartEngine {
           this.state.viewEnd = pivotTime + minWidth * (1 - pivotRatio);
           console.log(`   \u26A0\uFE0F Clamped to minWidth, new view: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
         }
+        this.checkAndReloadData();
         this.render();
       }
     } finally {
@@ -43071,6 +43072,7 @@ var ChartEngine = class _ChartEngine {
   handleMouseUp() {
     this.state.isDragging = false;
     this.overlayCanvas.style.cursor = "crosshair";
+    this.checkAndReloadData();
   }
   handleDrag(e2) {
     const dx = e2.clientX - this.state.dragStartX;
@@ -43126,6 +43128,20 @@ var ChartEngine = class _ChartEngine {
       return true;
     }
     return false;
+  }
+  checkAndReloadData() {
+    if (this.state.isLoading || this.state.data.length === 0) return;
+    const dataStart = this.state.data[0].time;
+    const dataEnd = this.state.data[this.state.data.length - 1].time;
+    const viewWidth = this.state.viewEnd - this.state.viewStart;
+    const threshold = viewWidth * 0.5;
+    const needsReload = this.state.viewStart < dataStart + threshold || this.state.viewEnd > dataEnd - threshold;
+    if (needsReload) {
+      console.log(`\u{1F504} Reloading data - view approaching data boundaries`);
+      console.log(`   Data range: ${new Date(dataStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(dataEnd * 1e3).toISOString().substring(0, 16)}`);
+      console.log(`   View range: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+      this.loadData(this.state.symbol, this.state.currentTimeframe);
+    }
   }
   updateCrosshair() {
     if (!this.state.showCrosshair || this.state.data.length === 0) return;
