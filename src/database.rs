@@ -62,6 +62,14 @@ impl DatabaseManager {
             [],
         )?;
 
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candles_query
+                ON candlesticks (
+                provider, symbol, timeframe, open_time
+            )",
+            [],
+        )?;
+
         // Table de statut des timeframes (pour monitoring uniquement)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS timeframe_status (
