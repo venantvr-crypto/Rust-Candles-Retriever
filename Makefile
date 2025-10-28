@@ -1,9 +1,9 @@
-.PHONY: help build check test clean run-ada run-bnb run-btc run-sol verify-data web fmt clippy doc db-status db-counts db-shell
+.PHONY: help build check test clean run-ada run-bnb run-btc run-sol verify-data web fmt clippy doc db-status db-counts db-shell migrate
 
 # Variables
 CARGO = cargo
 BINARY = rust_candles_retriever
-DB_FILE = candlesticks.db
+DB_DIR = .
 START_DATE = 2024-01-01
 
 # Couleurs pour l'output
@@ -28,43 +28,42 @@ check: ## Vérifie le code sans compiler
 clean: ## Nettoie les fichiers générés
 	@echo "$(GREEN)Nettoyage...$(NC)"
 	$(CARGO) clean
-	rm -f $(DB_FILE)
 
 # Configurations principales - Run/Debug
 
 run-ada: ## Lance la récupération pour ADAUSDT
 	@echo "$(GREEN)Lancement de la récupération pour ADAUSDT...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol ADAUSDT --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol ADAUSDT --db-dir $(DB_DIR)
 
 run-bnb: ## Lance la récupération pour BNBUSDT
 	@echo "$(GREEN)Lancement de la récupération pour BNBUSDT...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol BNBUSDT --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol BNBUSDT --db-dir $(DB_DIR)
 
 run-btc: ## Lance la récupération pour BTCUSDT
 	@echo "$(GREEN)Lancement de la récupération pour BTCUSDT...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol BTCUSDT --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol BTCUSDT --db-dir $(DB_DIR)
 
 run-sol: ## Lance la récupération pour SOLUSDT
 	@echo "$(GREEN)Lancement de la récupération pour SOLUSDT...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol SOLUSDT --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol SOLUSDT --db-dir $(DB_DIR)
 
 # Configurations avec date de début
 
 run-ada-from: ## Lance ADAUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour ADAUSDT depuis $(START_DATE)...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol ADAUSDT --start-date $(START_DATE) --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol ADAUSDT --start-date $(START_DATE) --db-dir $(DB_DIR)
 
 run-bnb-from: ## Lance BNBUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour BNBUSDT depuis $(START_DATE)...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol BNBUSDT --start-date $(START_DATE) --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol BNBUSDT --start-date $(START_DATE) --db-dir $(DB_DIR)
 
 run-btc-from: ## Lance BTCUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour BTCUSDT depuis $(START_DATE)...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol BTCUSDT --start-date $(START_DATE) --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol BTCUSDT --start-date $(START_DATE) --db-dir $(DB_DIR)
 
 run-sol-from: ## Lance SOLUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour SOLUSDT depuis $(START_DATE)...$(NC)"
-	$(CARGO) run --bin $(BINARY) -- --symbol SOLUSDT --start-date $(START_DATE) --db-file $(DB_FILE)
+	$(CARGO) run --bin $(BINARY) -- --symbol SOLUSDT --start-date $(START_DATE) --db-dir $(DB_DIR)
 
 # Développement
 
@@ -82,17 +81,31 @@ doc: ## Génère la documentation
 
 # Inspection de la base de données
 
-db-status: ## Affiche le statut des timeframes
+db-status: ## Affiche le statut des timeframes (toutes BDD)
 	@echo "$(GREEN)Statut des timeframes:$(NC)"
-	@sqlite3 $(DB_FILE) "SELECT provider, symbol, timeframe, datetime(oldest_candle_time/1000, 'unixepoch') as oldest FROM timeframe_status ORDER BY symbol, timeframe;"
+	@for db in $(DB_DIR)/*.db; do \
+		if [ -f "$$db" ]; then \
+			echo "\n=== $$db ===" && \
+			sqlite3 "$$db" "SELECT provider, symbol, timeframe, datetime(oldest_time/1000, 'unixepoch') as oldest FROM timeframe_status ORDER BY timeframe;"; \
+		fi \
+	done
 
-db-counts: ## Affiche le nombre de bougies par timeframe
+db-counts: ## Affiche le nombre de bougies par timeframe (toutes BDD)
 	@echo "$(GREEN)Nombre de bougies par timeframe:$(NC)"
-	@sqlite3 $(DB_FILE) "SELECT symbol, timeframe, COUNT(*) as count FROM candlesticks GROUP BY symbol, timeframe ORDER BY symbol, timeframe;"
+	@for db in $(DB_DIR)/*.db; do \
+		if [ -f "$$db" ]; then \
+			echo "\n=== $$db ===" && \
+			sqlite3 "$$db" "SELECT symbol, timeframe, COUNT(*) as count FROM candlesticks GROUP BY symbol, timeframe ORDER BY timeframe;"; \
+		fi \
+	done
 
-db-shell: ## Ouvre un shell SQLite
-	@echo "$(GREEN)Ouverture du shell SQLite...$(NC)"
-	@sqlite3 $(DB_FILE)
+db-shell: ## Ouvre un shell SQLite (spécifiez SYMBOL=BTCUSDT)
+	@if [ -z "$(SYMBOL)" ]; then \
+		echo "$(YELLOW)Usage: make db-shell SYMBOL=BTCUSDT$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)Ouverture du shell SQLite pour $(SYMBOL)...$(NC)"
+	@sqlite3 $(DB_DIR)/$(SYMBOL).db
 
 # Serveur Web
 
@@ -105,4 +118,8 @@ web: ## Lance le serveur web (port 8080)
 	@cd web && npm run build
 	@echo "$(GREEN)Démarrage du serveur web sur http://127.0.0.1:8080$(NC)"
 	@echo "$(YELLOW)Ouvrez votre navigateur à: http://127.0.0.1:8080$(NC)"
-	DB_PATH=$(DB_FILE) $(CARGO) run --bin web_server
+	DB_DIR=$(DB_DIR) $(CARGO) run --bin web_server
+
+migrate: ## Migre candlesticks.db vers des BDD par paire
+	@echo "$(GREEN)Migration des données vers bases par paire...$(NC)"
+	$(CARGO) run --bin migrate_to_per_pair -- --source candlesticks.db --dest-dir $(DB_DIR)

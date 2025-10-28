@@ -75,6 +75,9 @@ async function loadPairs(): Promise<void> {
         selector.addEventListener('change', async (e: any) => {
             app.currentPair = e.target.value;
             if (app.currentPair) {
+                // Sauvegarder dans localStorage
+                localStorage.setItem('selectedPair', app.currentPair);
+
                 // Récupérer les timeframes disponibles pour cette paire
                 app.availableTimeframes = pairsData[app.currentPair] || [];
                 app.chart.setTimeframes(app.availableTimeframes);
@@ -89,10 +92,14 @@ async function loadPairs(): Promise<void> {
             }
         });
 
-        // Auto-select first
-        if (pairs.length > 0) {
-            selector.value = pairs[0].symbol;
-            app.currentPair = pairs[0].symbol;
+        // Charger la paire sauvegardée depuis localStorage
+        const savedPair = localStorage.getItem('selectedPair');
+        let initialPair = savedPair && pairsData[savedPair] ? savedPair : (pairs.length > 0 ? pairs[0].symbol : null);
+
+        // Auto-select
+        if (initialPair) {
+            selector.value = initialPair;
+            app.currentPair = initialPair;
             app.availableTimeframes = pairsData[app.currentPair] || [];
             app.chart.setTimeframes(app.availableTimeframes);
 
@@ -101,9 +108,8 @@ async function loadPairs(): Promise<void> {
                 : app.availableTimeframes[app.availableTimeframes.length - 1];
 
             await loadCandles();
+            console.log(`✅ Loaded ${pairs.length} pairs (selected: ${initialPair})`);
         }
-
-        console.log(`✅ Loaded ${pairs.length} pairs`);
     } catch (error) {
         console.error('Error loading pairs:', error);
         updateStatus('Error loading pairs', true);
