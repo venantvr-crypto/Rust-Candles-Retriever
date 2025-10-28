@@ -101,8 +101,8 @@ web: ## Lance le serveur web (port 8080)
 	-@pkill -f web_server 2>/dev/null
 	# -@fuser -k 8080/tcp 2>/dev/null
 	@sleep 1
-	@echo "$(GREEN)Compilation TypeScript...$(NC)"
-	@cd web && npx tsc
+	@echo "$(GREEN)Build avec esbuild (TypeScript + PixiJS)...$(NC)"
+	@cd web && npm run build
 	@echo "$(GREEN)Démarrage du serveur web sur http://127.0.0.1:8080$(NC)"
 	@echo "$(YELLOW)Ouvrez votre navigateur à: http://127.0.0.1:8080$(NC)"
 	DB_PATH=$(DB_FILE) $(CARGO) run --bin web_server

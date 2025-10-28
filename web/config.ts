@@ -1,4 +1,4 @@
-import {Config} from './types.js';
+import {Config} from './types';
 
 const DEFAULT_CONFIG: Config = {
     candles: {
@@ -47,7 +47,7 @@ const DEFAULT_CONFIG: Config = {
         labelBg: true,
     },
     indicators: {
-        enabled: false,
+        enabled: true,
         heightPercent: 30,
         rsi: {
             type: 'rsi',
