@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 /// État partagé de l'application
 struct AppState {
-    db_path: String,
+    db_dir: String,
 }
 
 /// Représentation d'une bougie pour l'API
@@ -47,56 +47,78 @@ struct CandlesQuery {
     end: Option<i64>,   // Timestamp de fin en secondes
 }
 
-/// GET /api/pairs - Récupère toutes les paires disponibles
+/// GET /api/pairs - Récupère toutes les paires disponibles en scannant les fichiers .db
 #[get("/api/pairs")]
 async fn get_pairs(data: web::Data<Mutex<AppState>>) -> impl Responder {
     let state = data.lock().unwrap();
-    let conn = match Connection::open(&state.db_path) {
-        Ok(c) => c,
+
+    // Scanner tous les fichiers .db dans le répertoire
+    let db_dir = std::path::Path::new(&state.db_dir);
+    let entries = match std::fs::read_dir(db_dir) {
+        Ok(e) => e,
         Err(e) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error: {}", e)
+                "error": format!("Failed to read db directory: {}", e)
             }));
         }
     };
 
-    // Récupérer toutes les paires distinctes avec leurs timeframes
-    let mut stmt = match conn.prepare(
-        "SELECT DISTINCT symbol, timeframe
-         FROM candlesticks
-         WHERE provider = 'binance'
-         ORDER BY symbol, timeframe",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Query error: {}", e)
-            }));
-        }
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) {
-        Ok(r) => r,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Query mapping error: {}", e)
-            }));
-        }
-    };
-
-    // Grouper par symbole
     let mut pairs_map: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
 
-    for row in rows {
-        if let Ok((symbol, timeframe)) = row {
-            pairs_map
-                .entry(symbol)
-                .or_insert_with(Vec::new)
-                .push(timeframe);
+    // Pour chaque fichier .db
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        // Vérifier que c'est un fichier .db
+        if !path.is_file() {
+            continue;
         }
+
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if !file_name.ends_with(".db") {
+            continue;
+        }
+
+        // Extraire le symbole du nom de fichier (ex: BTCUSDT.db -> BTCUSDT)
+        let symbol = file_name.trim_end_matches(".db").to_string();
+
+        // Ouvrir la base de données pour récupérer les timeframes
+        let conn = match Connection::open(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Failed to open {}: {}", file_name, e);
+                continue;
+            }
+        };
+
+        // Récupérer les timeframes pour ce symbole
+        let mut stmt = match conn.prepare(
+            "SELECT DISTINCT timeframe
+             FROM candlesticks
+             WHERE provider = 'binance'
+             ORDER BY timeframe",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to query timeframes for {}: {}", symbol, e);
+                continue;
+            }
+        };
+
+        let timeframes: Vec<String> = match stmt.query_map([], |row| row.get(0)) {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(e) => {
+                eprintln!("Failed to map timeframes for {}: {}", symbol, e);
+                continue;
+            }
+        };
+
+        pairs_map.insert(symbol, timeframes);
     }
 
     let pairs: Vec<TradingPair> = pairs_map
@@ -114,11 +136,15 @@ async fn get_candles(
     query: web::Query<CandlesQuery>,
 ) -> impl Responder {
     let state = data.lock().unwrap();
-    let conn = match Connection::open(&state.db_path) {
+
+    // Construire le chemin vers la base de données de la paire
+    let db_path = format!("{}/{}.db", state.db_dir, query.symbol);
+
+    let conn = match Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error: {}", e)
+                "error": format!("Database error for {}: {}", query.symbol, e)
             }));
         }
     };
@@ -409,17 +435,17 @@ async fn health() -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "candlesticks.db".to_string());
+    let db_dir = std::env::var("DB_DIR").unwrap_or_else(|_| ".".to_string());
     let port = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()
         .unwrap_or(8080);
 
     println!("🚀 Démarrage du serveur web sur http://127.0.0.1:{}", port);
-    println!("📊 Base de données: {}", db_path);
+    println!("📊 Répertoire bases de données: {}", db_dir);
     println!("📁 Fichiers statiques: ./web");
 
-    let app_state = web::Data::new(Mutex::new(AppState { db_path }));
+    let app_state = web::Data::new(Mutex::new(AppState { db_dir }));
 
     HttpServer::new(move || {
         let cors = Cors::permissive();

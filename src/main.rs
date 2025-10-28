@@ -24,9 +24,9 @@ struct Args {
     #[arg(short = 'd', long)]
     start_date: Option<String>,
 
-    /// Fichier de base de données
-    #[arg(long, default_value = "candlesticks.db")]
-    db_file: String,
+    /// Répertoire des bases de données (une par paire)
+    #[arg(long, default_value = ".")]
+    db_dir: String,
 }
 
 fn main() -> Result<()> {
@@ -35,8 +35,12 @@ fn main() -> Result<()> {
 
     println!("Démarrage de la récupération pour le symbole: {}", symbol);
 
-    // Initialiser la base de données
-    let mut db = DatabaseManager::new(&args.db_file)?;
+    // Créer le nom de fichier basé sur le symbole (ex: BTCUSDT.db)
+    let db_file = format!("{}/{}.db", args.db_dir, symbol);
+    println!("Fichier de base de données: {}", db_file);
+
+    // Initialiser la base de données (sera créée si elle n'existe pas)
+    let mut db = DatabaseManager::new(&db_file)?;
     println!("Base de données initialisée.\n");
 
     // Timeframes supportés - liste dynamique
