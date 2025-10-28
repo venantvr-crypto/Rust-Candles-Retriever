@@ -101,7 +101,7 @@ export class ChartEngine {
         // Layout
         this.layout = {
             marginLeft: 70,
-            marginRight: 15,
+            marginRight: 60,
             marginTop: 15,
             marginBottom: 40
         };
@@ -773,7 +773,15 @@ export class ChartEngine {
         const chartX = this.layout.marginLeft;
         const chartY = this.layout.marginTop;
         const chartW = w - this.layout.marginLeft - this.layout.marginRight;
-        const chartH = h - this.layout.marginTop - this.layout.marginBottom;
+
+        // Ajuster chartH si indicateurs en mode séparé
+        let chartH = h - this.layout.marginTop - this.layout.marginBottom;
+        let indicatorH = 0;
+        if (chartConfig.get('indicators.enabled') && this.rsiData.size > 0 && !chartConfig.get('indicators.rsi.overlay')) {
+            const indicatorHeightPercent = chartConfig.get('indicators.heightPercent') / 100;
+            indicatorH = h * indicatorHeightPercent;
+            chartH = chartH - indicatorH - 5; // 5px de séparation
+        }
 
         // Filtrer bougies visibles
         const visibleCandles = this.state.data.filter(c =>
@@ -878,7 +886,7 @@ export class ChartEngine {
                 const candleChartH = chartH - volumeHeight;
                 this.renderIndicatorsOverlay(chartX, chartY, chartW, candleChartH, timeToX, priceMin, priceMax, priceRange);
             } else {
-                this.renderIndicatorsSeparate(chartX, chartY, chartW, chartH, w, h, timeToX);
+                this.renderIndicatorsSeparate(chartX, chartY, chartW, chartH, indicatorH, timeToX);
             }
         }
 
@@ -964,22 +972,21 @@ export class ChartEngine {
         this.mainCtx.textAlign = 'left';
         [30, 50, 70].forEach(level => {
             const y = rsiToY(level);
-            this.mainCtx.fillText(level.toString(), chartX + chartW + 5, y + 3);
+            this.mainCtx.fillText(`RSI ${level}`, chartX + chartW + 5, y + 3);
         });
 
         this.mainCtx.restore();
     }
 
-    renderIndicatorsSeparate(chartX, chartY, chartW, chartH, w, h, timeToX) {
+    renderIndicatorsSeparate(chartX, chartY, chartW, chartH, indicatorH, timeToX) {
         if (this.rsiData.size === 0) {
             console.log('📊 No RSI data to render (separate mode)');
             return;
         }
         console.log(`📊 Rendering RSI (separate mode) for ${this.rsiData.size} timeframes`);
 
-        const indicatorHeightPercent = chartConfig.get('indicators.heightPercent') / 100;
-        const indicatorH = h * indicatorHeightPercent;
-        const indicatorY = h - this.layout.marginBottom - indicatorH;
+        // Positionner le panneau RSI juste en dessous de la zone des prix
+        const indicatorY = chartY + chartH + 5;
 
         // Fond
         this.mainCtx.fillStyle = this.theme.bg === '#ffffff' ? '#f9f9f9' : '#252525';
