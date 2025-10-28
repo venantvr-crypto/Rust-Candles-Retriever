@@ -43,6 +43,10 @@ run-btc: ## Lance la récupération pour BTCUSDT
 	@echo "$(GREEN)Lancement de la récupération pour BTCUSDT...$(NC)"
 	$(CARGO) run --bin $(BINARY) -- --symbol BTCUSDT --db-dir $(DB_DIR)
 
+run-eth: ## Lance la récupération pour SOLUSDT
+	@echo "$(GREEN)Lancement de la récupération pour ETHUSDT...$(NC)"
+	$(CARGO) run --bin $(BINARY) -- --symbol ETHUSDT --db-dir $(DB_DIR)
+
 run-sol: ## Lance la récupération pour SOLUSDT
 	@echo "$(GREEN)Lancement de la récupération pour SOLUSDT...$(NC)"
 	$(CARGO) run --bin $(BINARY) -- --symbol SOLUSDT --db-dir $(DB_DIR)
@@ -60,6 +64,10 @@ run-bnb-from: ## Lance BNBUSDT avec START_DATE
 run-btc-from: ## Lance BTCUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour BTCUSDT depuis $(START_DATE)...$(NC)"
 	$(CARGO) run --bin $(BINARY) -- --symbol BTCUSDT --start-date $(START_DATE) --db-dir $(DB_DIR)
+
+run-eth-from: ## Lance SOLUSDT avec START_DATE
+	@echo "$(GREEN)Lancement de la récupération pour ETHUSDT depuis $(START_DATE)...$(NC)"
+	$(CARGO) run --bin $(BINARY) -- --symbol ETHUSDT --start-date $(START_DATE) --db-dir $(DB_DIR)
 
 run-sol-from: ## Lance SOLUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour SOLUSDT depuis $(START_DATE)...$(NC)"

@@ -36,7 +36,7 @@ fn main() -> Result<()> {
 
     // Récupérer tous les symboles distincts
     let mut stmt = source_conn.prepare(
-        "SELECT DISTINCT symbol FROM candlesticks WHERE provider = 'binance' ORDER BY symbol"
+        "SELECT DISTINCT symbol FROM candlesticks WHERE provider = 'binance' ORDER BY symbol",
     )?;
 
     let symbols: HashSet<String> = stmt
@@ -120,7 +120,7 @@ fn migrate_symbol(source: &Connection, symbol: &str, dest_dir: &str) -> Result<(
                 volume, close_time, quote_asset_volume, number_of_trades,
                 taker_buy_base_asset_volume, taker_buy_quote_asset_volume, interpolated
          FROM candlesticks
-         WHERE symbol = ?1"
+         WHERE symbol = ?1",
     )?;
 
     let mut insert_stmt = dest.prepare(
@@ -128,7 +128,7 @@ fn migrate_symbol(source: &Connection, symbol: &str, dest_dir: &str) -> Result<(
             provider, symbol, timeframe, open_time, open, high, low, close,
             volume, close_time, quote_asset_volume, number_of_trades,
             taker_buy_base_asset_volume, taker_buy_quote_asset_volume, interpolated
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     )?;
 
     let rows = select_stmt.query_map(params![symbol], |row| {
@@ -155,8 +155,8 @@ fn migrate_symbol(source: &Connection, symbol: &str, dest_dir: &str) -> Result<(
     for row_result in rows {
         let row = row_result?;
         insert_stmt.execute(params![
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
-            row.8, row.9, row.10, row.11, row.12, row.13, row.14
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+            row.12, row.13, row.14
         ])?;
         count += 1;
     }
@@ -165,12 +165,12 @@ fn migrate_symbol(source: &Connection, symbol: &str, dest_dir: &str) -> Result<(
     let mut select_status = source.prepare(
         "SELECT provider, symbol, timeframe, oldest_time, newest_time
          FROM timeframe_status
-         WHERE symbol = ?1"
+         WHERE symbol = ?1",
     )?;
 
     let mut insert_status = dest.prepare(
         "INSERT INTO timeframe_status (provider, symbol, timeframe, oldest_time, newest_time)
-         VALUES (?1, ?2, ?3, ?4, ?5)"
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
 
     let status_rows = select_status.query_map(params![symbol], |row| {
@@ -190,7 +190,10 @@ fn migrate_symbol(source: &Connection, symbol: &str, dest_dir: &str) -> Result<(
         status_count += 1;
     }
 
-    println!("  ✓ {} créé: {} candles, {} status", dest_path, count, status_count);
+    println!(
+        "  ✓ {} créé: {} candles, {} status",
+        dest_path, count, status_count
+    );
 
     Ok(())
 }

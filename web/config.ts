@@ -53,6 +53,7 @@ const DEFAULT_CONFIG: Config = {
             type: 'rsi',
             period: 14,
             overlay: false,
+            heatIntensity: 1.0,
         },
     },
 };
