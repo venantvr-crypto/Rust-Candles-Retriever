@@ -45,12 +45,13 @@ const DEFAULT_CONFIG = {
         labelBg: true,
     },
     indicators: {
-        enabled: false,
+        enabled: true,
         heightPercent: 30,
         rsi: {
             type: 'rsi',
             period: 14,
             overlay: false,
+            heatIntensity: 1.0,
         },
     },
 };

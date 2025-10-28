@@ -84,6 +84,7 @@ export interface IndicatorConfig {
     type: 'rsi';
     period: number;
     overlay: boolean;
+    heatIntensity: number;
 }
 
 export interface Config {

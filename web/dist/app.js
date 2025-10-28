@@ -41957,7 +41957,8 @@ var DEFAULT_CONFIG = {
     rsi: {
       type: "rsi",
       period: 14,
-      overlay: false
+      overlay: false,
+      heatIntensity: 1
     }
   }
 };
@@ -43253,10 +43254,8 @@ var ChartEngine = class _ChartEngine {
   updateRSILegend() {
     this.legendContainer.innerHTML = "";
     if (this.rsiData.size === 0 || !chartConfig.get("indicators.enabled")) return;
-    const colors = ["#2196F3", "#FF9800", "#4CAF50", "#9C27B0", "#F44336"];
-    let colorIdx = 0;
     this.rsiData.forEach((data, tf) => {
-      const color = colors[colorIdx++ % colors.length];
+      const color = this.getRSIColorForTimeframe(tf);
       const label = document.createElement("label");
       label.style.cssText = `display: inline-flex; align-items: center; margin: 0 10px 5px 0; padding: 4px 8px; background: rgba(0,0,0,0.7); border-radius: 4px; font-size: 11px; color: ${color}; cursor: pointer; font-family: monospace;`;
       const checkbox = document.createElement("input");
@@ -43287,6 +43286,19 @@ var ChartEngine = class _ChartEngine {
       if (!lastValid) return null;
       return { time: targetTime, value: lastValid.value };
     }).filter((p2) => p2 !== null);
+  }
+  getRSIColorForTimeframe(tf) {
+    const intensity = chartConfig.get("indicators.rsi.heatIntensity") || 1;
+    const loadedTFs = Array.from(this.rsiData.keys()).sort(
+      (a2, b3) => this.parseTimeframeToSeconds(a2) - this.parseTimeframeToSeconds(b3)
+    );
+    const tfIndex = loadedTFs.indexOf(tf);
+    if (tfIndex === -1) return "#FF8C00";
+    const normalizedIndex = loadedTFs.length > 1 ? tfIndex / (loadedTFs.length - 1) : 0.5;
+    const r2 = 255;
+    const g2 = Math.round(215 * (1 - normalizedIndex));
+    const b2 = 0;
+    return `#${r2.toString(16).padStart(2, "0")}${g2.toString(16).padStart(2, "0")}${b2.toString(16).padStart(2, "0")}`;
   }
   fitToData() {
     if (this.state.data.length === 0) return;
@@ -43498,8 +43510,6 @@ var ChartEngine = class _ChartEngine {
       return;
     }
     console.log(`\u{1F4CA} Rendering RSI (overlay mode) for ${this.rsiData.size} timeframes`);
-    const colors = ["#2196F3", "#FF9800", "#4CAF50", "#9C27B0", "#F44336"];
-    let colorIdx = 0;
     const rsiToY = (value) => {
       const ratio = value / 100;
       return chartY + chartH * (1 - ratio);
@@ -43507,7 +43517,7 @@ var ChartEngine = class _ChartEngine {
     const rsiGraphics = new Graphics();
     this.rsiData.forEach((data, tf) => {
       if (!this.rsiVisibility.get(tf)) return;
-      const colorStr = colors[colorIdx++ % colors.length];
+      const colorStr = this.getRSIColorForTimeframe(tf);
       const color = parseInt(colorStr.replace("#", ""), 16);
       rsiGraphics.lineStyle(1.5, color, 1);
       let first = true;
@@ -43547,12 +43557,10 @@ var ChartEngine = class _ChartEngine {
       indicatorGraphics.lineTo(chartX + chartW, y2);
     });
     indicatorGraphics.stroke();
-    const colors = ["#2196F3", "#FF9800", "#4CAF50", "#9C27B0", "#F44336"];
-    let colorIdx = 0;
     const rsiToY = (value) => indicatorY + indicatorH * (1 - value / 100);
     this.rsiData.forEach((data, tf) => {
       if (!this.rsiVisibility.get(tf)) return;
-      const colorStr = colors[colorIdx++ % colors.length];
+      const colorStr = this.getRSIColorForTimeframe(tf);
       const color = parseInt(colorStr.replace("#", ""), 16);
       indicatorGraphics.lineStyle(1.5, color, 1);
       let first = true;
@@ -43940,6 +43948,7 @@ async function loadPairs() {
     selector.addEventListener("change", async (e2) => {
       app.currentPair = e2.target.value;
       if (app.currentPair) {
+        localStorage.setItem("selectedPair", app.currentPair);
         app.availableTimeframes = pairsData[app.currentPair] || [];
         app.chart.setTimeframes(app.availableTimeframes);
         app.currentTimeframe = app.availableTimeframes.includes("1d") ? "1d" : app.availableTimeframes[app.availableTimeframes.length - 1];
@@ -43947,15 +43956,17 @@ async function loadPairs() {
         await loadCandles();
       }
     });
-    if (pairs.length > 0) {
-      selector.value = pairs[0].symbol;
-      app.currentPair = pairs[0].symbol;
+    const savedPair = localStorage.getItem("selectedPair");
+    let initialPair = savedPair && pairsData[savedPair] ? savedPair : pairs.length > 0 ? pairs[0].symbol : null;
+    if (initialPair) {
+      selector.value = initialPair;
+      app.currentPair = initialPair;
       app.availableTimeframes = pairsData[app.currentPair] || [];
       app.chart.setTimeframes(app.availableTimeframes);
       app.currentTimeframe = app.availableTimeframes.includes("1d") ? "1d" : app.availableTimeframes[app.availableTimeframes.length - 1];
       await loadCandles();
+      console.log(`\u2705 Loaded ${pairs.length} pairs (selected: ${initialPair})`);
     }
-    console.log(`\u2705 Loaded ${pairs.length} pairs`);
   } catch (error) {
     console.error("Error loading pairs:", error);
     updateStatus("Error loading pairs", true);

@@ -678,11 +678,8 @@ export class ChartEngine {
         this.legendContainer.innerHTML = '';
         if (this.rsiData.size === 0 || !chartConfig.get('indicators.enabled')) return;
 
-        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
-        let colorIdx = 0;
-
         this.rsiData.forEach((data, tf) => {
-            const color = colors[colorIdx++ % colors.length];
+            const color = this.getRSIColorForTimeframe(tf);
 
             const label = document.createElement('label');
             label.style.cssText = `display: inline-flex; align-items: center; margin: 0 10px 5px 0; padding: 4px 8px; background: rgba(0,0,0,0.7); border-radius: 4px; font-size: 11px; color: ${color}; cursor: pointer; font-family: monospace;`;
@@ -725,6 +722,31 @@ export class ChartEngine {
             // Retourner avec le timestamp de référence (celui du candle affiché)
             return {time: targetTime, value: lastValid.value};
         }).filter(p => p !== null);
+    }
+
+    getRSIColorForTimeframe(tf) {
+        // Gradient de chaleur: TF fine → jaune (précis), TF large → rouge (moins précis)
+        const intensity = chartConfig.get('indicators.rsi.heatIntensity') || 1.0;
+
+        // Utiliser l'ordre des TF chargées pour le RSI (pas toutes les TF)
+        const loadedTFs = Array.from(this.rsiData.keys()).sort((a, b) =>
+            this.parseTimeframeToSeconds(a) - this.parseTimeframeToSeconds(b)
+        );
+
+        const tfIndex = loadedTFs.indexOf(tf);
+        if (tfIndex === -1) return '#FF8C00';
+
+        // Normaliser: 0 = TF fine (jaune), 1 = TF large (rouge)
+        const normalizedIndex = loadedTFs.length > 1
+            ? tfIndex / (loadedTFs.length - 1)
+            : 0.5;
+
+        // Jaune (#FFD700) → Orange → Rouge (#FF0000)
+        const r = 255;
+        const g = Math.round(215 * (1 - normalizedIndex));
+        const b = 0;
+
+        return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
     }
 
     fitToData() {
@@ -1020,9 +1042,6 @@ export class ChartEngine {
         }
         console.log(`📊 Rendering RSI (overlay mode) for ${this.rsiData.size} timeframes`);
 
-        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
-        let colorIdx = 0;
-
         // RSI: 0-100, on le superpose avec échelle à droite
         const rsiToY = (value) => {
             const ratio = value / 100;
@@ -1033,7 +1052,7 @@ export class ChartEngine {
 
         this.rsiData.forEach((data, tf) => {
             if (!this.rsiVisibility.get(tf)) return;
-            const colorStr = colors[colorIdx++ % colors.length];
+            const colorStr = this.getRSIColorForTimeframe(tf);
             const color = parseInt(colorStr.replace('#', ''), 16);
 
             rsiGraphics.lineStyle(1.5, color, 1);
@@ -1087,14 +1106,11 @@ export class ChartEngine {
         indicatorGraphics.stroke();
 
         // Courbes RSI
-        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
-        let colorIdx = 0;
-
         const rsiToY = (value) => indicatorY + indicatorH * (1 - value / 100);
 
         this.rsiData.forEach((data, tf) => {
             if (!this.rsiVisibility.get(tf)) return;
-            const colorStr = colors[colorIdx++ % colors.length];
+            const colorStr = this.getRSIColorForTimeframe(tf);
             const color = parseInt(colorStr.replace('#', ''), 16);
 
             indicatorGraphics.lineStyle(1.5, color, 1);

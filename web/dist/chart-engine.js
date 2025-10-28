@@ -1,23 +1,15 @@
-import { chartConfig } from './config.js';
+import { chartConfig } from './config';
 import * as PIXI from 'pixi.js';
 /**
  * ChartEngine - Moteur de rendu de chandelier haute performance avec WebGL (PixiJS)
  * Architecture: MVC pattern pour séparation des responsabilités
  */
 export class ChartEngine {
-    constructor(container, options = {}) {
+    constructor(container, app, options = {}) {
         this.container = container;
-        // Application PixiJS avec WebGL
-        this.app = new PIXI.Application({
-            width: container.clientWidth,
-            height: container.clientHeight,
-            backgroundColor: 0xffffff,
-            antialias: true,
-            resolution: window.devicePixelRatio || 1,
-            autoDensity: true
-        });
+        this.app = app;
         // Ajouter le canvas PixiJS au conteneur
-        const pixiCanvas = this.app.view;
+        const pixiCanvas = this.app.canvas;
         pixiCanvas.style.position = 'absolute';
         pixiCanvas.style.left = '0';
         pixiCanvas.style.top = '0';
@@ -39,24 +31,38 @@ export class ChartEngine {
         this.container.appendChild(this.overlayCanvas);
         // Stub pour compatibilité
         this.mainCtx = {
-            clearRect: () => { },
+            clearRect: () => {
+            },
             fillStyle: '',
             strokeStyle: '',
-            fillRect: () => { },
-            strokeRect: () => { },
-            beginPath: () => { },
-            moveTo: () => { },
-            lineTo: () => { },
-            stroke: () => { },
-            fill: () => { },
-            save: () => { },
-            restore: () => { },
+            fillRect: () => {
+            },
+            strokeRect: () => {
+            },
+            beginPath: () => {
+            },
+            moveTo: () => {
+            },
+            lineTo: () => {
+            },
+            stroke: () => {
+            },
+            fill: () => {
+            },
+            save: () => {
+            },
+            restore: () => {
+            },
+            setLineDash: () => {
+            },
+            measureText: (text) => ({ width: text.length * 7 }),
             lineWidth: 1,
             globalAlpha: 1,
             font: '',
             textAlign: '',
             textBaseline: '',
-            fillText: () => { }
+            fillText: () => {
+            }
         };
         this.setupCanvasSizes();
         // Configuration timeframes (sera définie par setTimeframes())
@@ -118,6 +124,19 @@ export class ChartEngine {
         this.setupEvents();
         // Rendu initial
         this.renderBackground();
+    }
+    static async create(container, options = {}) {
+        // Initialiser PixiJS Application (async dans v8)
+        const app = new PIXI.Application();
+        await app.init({
+            width: container.clientWidth,
+            height: container.clientHeight,
+            backgroundColor: 0xffffff,
+            antialias: true,
+            resolution: window.devicePixelRatio || 1,
+            autoDensity: true
+        });
+        return new ChartEngine(container, app, options);
     }
     parseTimeframeToSeconds(tf) {
         const match = tf.match(/^(\d+)([mhd])$/);
@@ -187,11 +206,13 @@ export class ChartEngine {
     setupCanvasSizes() {
         const rect = this.container.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
+        // Reset canvas size (this also resets the context)
         this.overlayCanvas.width = rect.width * dpr;
         this.overlayCanvas.height = rect.height * dpr;
         this.overlayCanvas.style.width = rect.width + 'px';
         this.overlayCanvas.style.height = rect.height + 'px';
-        this.overlayCtx.scale(dpr, dpr);
+        // Reapply scale after reset
+        this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
     resizeCanvas() {
         const rect = this.container.getBoundingClientRect();
@@ -199,7 +220,8 @@ export class ChartEngine {
         this.setupCanvasSizes();
     }
     setupEvents() {
-        const canvas = this.app.view;
+        // Attacher les événements à overlayCanvas (qui est au-dessus de PixiJS)
+        const canvas = this.overlayCanvas;
         // Wheel zoom
         canvas.addEventListener('wheel', (e) => this.handleWheel(e));
         // Mouse tracking
@@ -297,14 +319,18 @@ export class ChartEngine {
         else {
             this.state.showCrosshair = true;
             this.updateCrosshair();
-            this.renderOverlay();
+            this.renderOverlayOnly();
         }
     }
     handleMouseLeave() {
         this.state.showCrosshair = false;
         this.state.mouseX = -1;
         this.state.mouseY = -1;
-        this.renderOverlay();
+        // Nettoyer l'overlay et redessiner seulement les éléments statiques
+        const w = this.app.screen.width;
+        const h = this.app.screen.height;
+        this.overlayCtx.clearRect(0, 0, w, h);
+        this.renderStaticOverlay();
     }
     handleMouseDown(e) {
         if (this.state.isLoading || this.state.data.length === 0)
@@ -523,10 +549,8 @@ export class ChartEngine {
         this.legendContainer.innerHTML = '';
         if (this.rsiData.size === 0 || !chartConfig.get('indicators.enabled'))
             return;
-        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
-        let colorIdx = 0;
         this.rsiData.forEach((data, tf) => {
-            const color = colors[colorIdx++ % colors.length];
+            const color = this.getRSIColorForTimeframe(tf);
             const label = document.createElement('label');
             label.style.cssText = `display: inline-flex; align-items: center; margin: 0 10px 5px 0; padding: 4px 8px; background: rgba(0,0,0,0.7); border-radius: 4px; font-size: 11px; color: ${color}; cursor: pointer; font-family: monospace;`;
             const checkbox = document.createElement('input');
@@ -562,6 +586,23 @@ export class ChartEngine {
             // Retourner avec le timestamp de référence (celui du candle affiché)
             return { time: targetTime, value: lastValid.value };
         }).filter(p => p !== null);
+    }
+    getRSIColorForTimeframe(tf) {
+        // Gradient de chaleur: TF fine → rouge/orange, TF large → jaune
+        const intensity = chartConfig.get('indicators.rsi.heatIntensity') || 1.0;
+        const tfIndex = this.timeframes.indexOf(tf);
+        if (tfIndex === -1)
+            return '#FF9800';
+        // Normaliser l'index (0 = TF la plus fine, 1 = TF la plus large)
+        const normalizedIndex = this.timeframes.length > 1
+            ? tfIndex / (this.timeframes.length - 1)
+            : 0.5;
+        // Interpoler entre rouge (0) et jaune (1)
+        // Rouge: #FF4500, Orange: #FF8C00, Jaune: #FFD700
+        const r = 255;
+        const g = Math.round(69 + (215 - 69) * normalizedIndex * intensity);
+        const b = Math.round(0 + (0 + 140 * normalizedIndex) * intensity);
+        return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
     }
     fitToData() {
         if (this.state.data.length === 0)
@@ -650,6 +691,8 @@ export class ChartEngine {
         const h = this.app.screen.height;
         // Nettoyer le layer principal (WebGL)
         this.mainLayer.removeChildren();
+        // Nettoyer l'overlay Canvas2D
+        this.overlayCtx.clearRect(0, 0, w, h);
         const chartX = this.layout.marginLeft;
         const chartY = this.layout.marginTop;
         const chartW = w - this.layout.marginLeft - this.layout.marginRight;
@@ -699,7 +742,6 @@ export class ChartEngine {
         const wickWidth = chartConfig.get('candles.wickWidth');
         const hollowUp = chartConfig.get('candles.hollowUp');
         const minBodyHeight = chartConfig.get('candles.minBodyHeight');
-        const candlesGraphics = new PIXI.Graphics();
         visibleCandles.forEach(candle => {
             const x = timeToX(candle.time);
             const yOpen = priceToY(candle.open);
@@ -709,10 +751,12 @@ export class ChartEngine {
             const isUp = candle.close >= candle.open;
             const color = parseInt(isUp ? this.theme.upColor.replace('#', '') : this.theme.downColor.replace('#', ''), 16);
             const borderColor = parseInt(isUp ? this.theme.upBorderColor.replace('#', '') : this.theme.downBorderColor.replace('#', ''), 16);
+            const candleGraphics = new PIXI.Graphics();
             // Mèche
-            candlesGraphics.lineStyle(wickWidth, color, 1);
-            candlesGraphics.moveTo(x, yHigh);
-            candlesGraphics.lineTo(x, yLow);
+            candleGraphics.lineStyle(wickWidth, color, 1);
+            candleGraphics.moveTo(x, yHigh);
+            candleGraphics.lineTo(x, yLow);
+            candleGraphics.stroke();
             // Corps
             const bodyTop = Math.min(yOpen, yClose);
             const bodyHeight = Math.max(minBodyHeight, Math.abs(yClose - yOpen));
@@ -720,23 +764,25 @@ export class ChartEngine {
             if (isUp && hollowUp) {
                 // Creux: juste bordure
                 if (borderWidth > 0) {
-                    candlesGraphics.lineStyle(borderWidth, borderColor, 1);
-                    candlesGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                    candleGraphics.lineStyle(borderWidth, borderColor, 1);
+                    candleGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                    candleGraphics.stroke();
                 }
             }
             else {
                 // Plein
-                candlesGraphics.beginFill(color);
-                candlesGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
-                candlesGraphics.endFill();
+                candleGraphics.beginFill(color);
+                candleGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                candleGraphics.endFill();
                 // Bordure optionnelle
                 if (borderWidth > 0) {
-                    candlesGraphics.lineStyle(borderWidth, borderColor, 1);
-                    candlesGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                    candleGraphics.lineStyle(borderWidth, borderColor, 1);
+                    candleGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                    candleGraphics.stroke();
                 }
             }
+            this.mainLayer.addChild(candleGraphics);
         });
-        this.mainLayer.addChild(candlesGraphics);
         // Indicateurs
         if (chartConfig.get('indicators.enabled') && this.rsiData.size > 0) {
             console.log(`📊 Rendering ${this.rsiData.size} RSI timeframes`);
@@ -750,15 +796,21 @@ export class ChartEngine {
                 this.renderIndicatorsSeparate(chartX, chartY, chartW, chartH, indicatorH, timeToX);
             }
         }
-        // Dessiner axe temps
-        this.renderTimeAxis(w, h);
-        // Ligne dernier prix
-        if (chartConfig.get('lastPrice.enabled') && visibleCandles.length > 0) {
-            this.renderLastPriceLine(visibleCandles, chartX, chartW, priceToY);
-        }
-        // Render overlay si nécessaire
+        // Sauvegarder les paramètres pour redessiner l'overlay
+        this.overlayParams = {
+            w, h,
+            priceMin, priceMax, priceRange, priceToY,
+            chartX, chartY, chartW, chartH,
+            visibleCandles,
+            volumeHeight,
+            indicatorH,
+            timeToX
+        };
+        // Dessiner éléments statiques sur overlay
+        this.renderStaticOverlay();
+        // Render crosshair dynamique si nécessaire
         if (this.state.showCrosshair) {
-            this.renderOverlay();
+            this.renderDynamicOverlay();
         }
     }
     renderVolume(candles, chartX, chartY, chartW, chartH, volumeHeight, timeToX) {
@@ -791,8 +843,6 @@ export class ChartEngine {
             return;
         }
         console.log(`📊 Rendering RSI (overlay mode) for ${this.rsiData.size} timeframes`);
-        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
-        let colorIdx = 0;
         // RSI: 0-100, on le superpose avec échelle à droite
         const rsiToY = (value) => {
             const ratio = value / 100;
@@ -802,7 +852,7 @@ export class ChartEngine {
         this.rsiData.forEach((data, tf) => {
             if (!this.rsiVisibility.get(tf))
                 return;
-            const colorStr = colors[colorIdx++ % colors.length];
+            const colorStr = this.getRSIColorForTimeframe(tf);
             const color = parseInt(colorStr.replace('#', ''), 16);
             rsiGraphics.lineStyle(1.5, color, 1);
             let first = true;
@@ -819,18 +869,10 @@ export class ChartEngine {
                     }
                 }
             });
+            rsiGraphics.stroke();
         });
         this.mainLayer.addChild(rsiGraphics);
-        // Échelle RSI à droite (Canvas 2D overlay pour UI)
-        this.overlayCtx.save();
-        this.overlayCtx.fillStyle = this.theme.textLight;
-        this.overlayCtx.font = '10px monospace';
-        this.overlayCtx.textAlign = 'left';
-        [30, 50, 70].forEach(level => {
-            const y = rsiToY(level);
-            this.overlayCtx.fillText(`RSI ${level}`, chartX + chartW + 5, y + 3);
-        });
-        this.overlayCtx.restore();
+        // Note: Les échelles RSI sont dessinées dans renderStaticOverlay()
     }
     renderIndicatorsSeparate(chartX, chartY, chartW, chartH, indicatorH, timeToX) {
         if (this.rsiData.size === 0) {
@@ -854,14 +896,13 @@ export class ChartEngine {
             indicatorGraphics.moveTo(chartX, y);
             indicatorGraphics.lineTo(chartX + chartW, y);
         });
+        indicatorGraphics.stroke();
         // Courbes RSI
-        const colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0', '#F44336'];
-        let colorIdx = 0;
         const rsiToY = (value) => indicatorY + indicatorH * (1 - value / 100);
         this.rsiData.forEach((data, tf) => {
             if (!this.rsiVisibility.get(tf))
                 return;
-            const colorStr = colors[colorIdx++ % colors.length];
+            const colorStr = this.getRSIColorForTimeframe(tf);
             const color = parseInt(colorStr.replace('#', ''), 16);
             indicatorGraphics.lineStyle(1.5, color, 1);
             let first = true;
@@ -878,19 +919,10 @@ export class ChartEngine {
                     }
                 }
             });
+            indicatorGraphics.stroke();
         });
         this.mainLayer.addChild(indicatorGraphics);
-        // Échelle gauche (Canvas 2D overlay pour UI)
-        this.overlayCtx.save();
-        this.overlayCtx.fillStyle = this.theme.text;
-        this.overlayCtx.font = '10px monospace';
-        this.overlayCtx.textAlign = 'right';
-        this.overlayCtx.textBaseline = 'middle';
-        [0, 30, 50, 70, 100].forEach(level => {
-            const y = indicatorY + indicatorH * (1 - level / 100);
-            this.overlayCtx.fillText(level.toString(), chartX - 5, y);
-        });
-        this.overlayCtx.restore();
+        // Note: Les échelles RSI sont dessinées dans renderStaticOverlay()
     }
     renderLastPriceLine(candles, chartX, chartW, priceToY) {
         const lastCandle = candles[candles.length - 1];
@@ -899,69 +931,84 @@ export class ChartEngine {
         const y = priceToY(lastCandle.close);
         const isUp = lastCandle.close >= lastCandle.open;
         const color = isUp ? this.theme.upColor : this.theme.downColor;
-        this.mainCtx.save();
-        this.mainCtx.strokeStyle = color;
-        this.mainCtx.lineWidth = 1;
+        this.overlayCtx.save();
+        this.overlayCtx.strokeStyle = color;
+        this.overlayCtx.lineWidth = 1;
         const lineStyle = chartConfig.get('lastPrice.lineStyle');
         if (lineStyle === 'dashed') {
-            this.mainCtx.setLineDash([4, 4]);
+            this.overlayCtx.setLineDash([4, 4]);
         }
         else if (lineStyle === 'dotted') {
-            this.mainCtx.setLineDash([2, 2]);
+            this.overlayCtx.setLineDash([2, 2]);
         }
-        this.mainCtx.beginPath();
-        this.mainCtx.moveTo(chartX, y);
-        this.mainCtx.lineTo(chartX + chartW, y);
-        this.mainCtx.stroke();
+        this.overlayCtx.beginPath();
+        this.overlayCtx.moveTo(chartX, y);
+        this.overlayCtx.lineTo(chartX + chartW, y);
+        this.overlayCtx.stroke();
         // Label
         if (chartConfig.get('lastPrice.labelBg')) {
             const text = lastCandle.close.toFixed(2);
-            this.mainCtx.font = '11px monospace';
-            const textWidth = this.mainCtx.measureText(text).width;
-            this.mainCtx.fillStyle = color;
-            this.mainCtx.fillRect(chartX + chartW + 5, y - 10, textWidth + 8, 20);
-            this.mainCtx.fillStyle = '#ffffff';
-            this.mainCtx.textAlign = 'left';
-            this.mainCtx.textBaseline = 'middle';
-            this.mainCtx.fillText(text, chartX + chartW + 9, y);
+            this.overlayCtx.font = '11px monospace';
+            const textWidth = this.overlayCtx.measureText(text).width;
+            this.overlayCtx.fillStyle = color;
+            this.overlayCtx.fillRect(chartX + chartW + 5, y - 10, textWidth + 8, 20);
+            this.overlayCtx.fillStyle = '#ffffff';
+            this.overlayCtx.textAlign = 'left';
+            this.overlayCtx.textBaseline = 'middle';
+            this.overlayCtx.fillText(text, chartX + chartW + 9, y);
         }
-        this.mainCtx.restore();
+        this.overlayCtx.restore();
     }
     formatPrice(price, priceStep) {
-        // Déterminer le nombre de décimales basé sur le step et la magnitude
-        if (priceStep >= 100) {
-            // Grands nombres: pas de décimales
-            return Math.round(price).toLocaleString('en-US');
+        // Déterminer le nombre de décimales basé sur le step
+        let decimals;
+        if (priceStep >= 1000) {
+            decimals = 0;
+        }
+        else if (priceStep >= 100) {
+            decimals = 0;
+        }
+        else if (priceStep >= 10) {
+            decimals = 0;
         }
         else if (priceStep >= 1) {
-            // Nombres moyens: 0-2 décimales selon le step
-            const decimals = priceStep >= 10 ? 0 : (priceStep >= 1 ? 1 : 2);
-            return price.toFixed(decimals);
+            decimals = 1;
+        }
+        else if (priceStep >= 0.1) {
+            decimals = 2;
         }
         else if (priceStep >= 0.01) {
-            // Petits nombres: 2-4 décimales
-            return price.toFixed(priceStep >= 0.1 ? 2 : 4);
+            decimals = 3;
+        }
+        else if (priceStep >= 0.001) {
+            decimals = 4;
         }
         else {
-            // Très petits nombres: plus de décimales
-            return price.toFixed(6);
+            decimals = 6;
         }
+        return price.toFixed(decimals);
     }
     renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH) {
-        this.mainCtx.fillStyle = this.theme.text;
-        this.mainCtx.font = '11px monospace';
-        this.mainCtx.textAlign = 'right';
-        this.mainCtx.textBaseline = 'middle';
+        this.overlayCtx.save();
+        this.overlayCtx.fillStyle = this.theme.text;
+        this.overlayCtx.font = '11px monospace';
+        this.overlayCtx.textAlign = 'right';
+        this.overlayCtx.textBaseline = 'middle';
         const priceStep = this.calculatePriceStep(priceRange);
         const start = Math.floor(priceMin / priceStep) * priceStep;
+        let count = 0;
         for (let price = start; price <= priceMax; price += priceStep) {
             const y = priceToY(price);
             if (y < chartY || y > chartY + chartH)
                 continue;
-            this.mainCtx.fillText(this.formatPrice(price, priceStep), this.layout.marginLeft - 8, y);
+            this.overlayCtx.fillText(this.formatPrice(price, priceStep), this.layout.marginLeft - 8, y);
+            count++;
         }
+        console.log(`📊 Price axis: rendered ${count} labels`);
+        this.overlayCtx.restore();
     }
     renderTimeAxis(w, h) {
+        this.overlayCtx.save();
         const chartX = this.layout.marginLeft;
         const chartW = w - this.layout.marginLeft - this.layout.marginRight;
         const viewDuration = this.state.viewEnd - this.state.viewStart;
@@ -997,10 +1044,10 @@ export class ChartEngine {
         const minSpacing = estimatedLabelWidth + 10; // Espace minimum entre labels
         const maxLabels = Math.floor(chartW / minSpacing);
         const numLabels = Math.max(3, Math.min(maxLabels, 12)); // Entre 3 et 12 labels
-        this.mainCtx.fillStyle = this.theme.text;
-        this.mainCtx.font = '11px sans-serif';
-        this.mainCtx.textAlign = 'center';
-        this.mainCtx.textBaseline = 'top';
+        this.overlayCtx.fillStyle = this.theme.text;
+        this.overlayCtx.font = '11px sans-serif';
+        this.overlayCtx.textAlign = 'center';
+        this.overlayCtx.textBaseline = 'top';
         const y = h - this.layout.marginBottom + 10;
         // Générer les timestamps à intervalles réguliers
         for (let i = 0; i <= numLabels; i++) {
@@ -1008,27 +1055,83 @@ export class ChartEngine {
             const timestamp = this.state.viewStart + ratio * viewDuration;
             const x = chartX + ratio * chartW;
             // Dessiner tick vertical
-            this.mainCtx.strokeStyle = this.theme.grid;
-            this.mainCtx.globalAlpha = 0.3;
-            this.mainCtx.lineWidth = 1;
-            this.mainCtx.beginPath();
-            this.mainCtx.moveTo(x, y - 5);
-            this.mainCtx.lineTo(x, y);
-            this.mainCtx.stroke();
-            this.mainCtx.globalAlpha = 1;
+            this.overlayCtx.strokeStyle = this.theme.grid;
+            this.overlayCtx.globalAlpha = 0.3;
+            this.overlayCtx.lineWidth = 1;
+            this.overlayCtx.beginPath();
+            this.overlayCtx.moveTo(x, y - 5);
+            this.overlayCtx.lineTo(x, y);
+            this.overlayCtx.stroke();
+            this.overlayCtx.globalAlpha = 1;
             // Dessiner label
-            this.mainCtx.fillText(formatFn(timestamp), x, y + 2);
+            this.overlayCtx.fillText(formatFn(timestamp), x, y + 2);
+        }
+        this.overlayCtx.restore();
+    }
+    renderStaticOverlay() {
+        if (!this.overlayParams)
+            return;
+        const { w, h, priceMin, priceMax, priceRange, priceToY, chartX, chartY, chartW, chartH, visibleCandles, volumeHeight, indicatorH, timeToX } = this.overlayParams;
+        // Dessiner axe prix
+        this.renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH);
+        // Dessiner axe temps
+        this.renderTimeAxis(w, h);
+        // Ligne dernier prix
+        if (chartConfig.get('lastPrice.enabled') && visibleCandles.length > 0) {
+            this.renderLastPriceLine(visibleCandles, chartX, chartW, priceToY);
+        }
+        // Échelles RSI
+        if (chartConfig.get('indicators.enabled') && this.rsiData.size > 0) {
+            const overlay = chartConfig.get('indicators.rsi.overlay');
+            if (overlay) {
+                // Mode overlay: échelle à droite
+                const candleChartH = chartH - volumeHeight;
+                this.renderRSIScaleOverlay(chartX, chartY, chartW, candleChartH, priceMin, priceMax, priceRange);
+            }
+            else {
+                // Mode séparé: échelle à gauche
+                const indicatorY = chartY + chartH + 5;
+                this.renderRSIScaleSeparate(chartX, indicatorY, indicatorH);
+            }
         }
     }
-    renderOverlay() {
-        const rect = this.container.getBoundingClientRect();
-        this.overlayCtx.clearRect(0, 0, rect.width, rect.height);
+    renderRSIScaleOverlay(chartX, chartY, chartW, chartH, priceMin, priceMax, priceRange) {
+        const padding = priceRange * 0.05;
+        const rsiToY = (value) => {
+            const ratio = value / 100;
+            return chartY + chartH * (1 - ratio);
+        };
+        this.overlayCtx.save();
+        this.overlayCtx.fillStyle = this.theme.textLight;
+        this.overlayCtx.font = '10px monospace';
+        this.overlayCtx.textAlign = 'left';
+        [30, 50, 70].forEach(level => {
+            const y = rsiToY(level);
+            this.overlayCtx.fillText(`RSI ${level}`, chartX + chartW + 5, y + 3);
+        });
+        this.overlayCtx.restore();
+    }
+    renderRSIScaleSeparate(chartX, indicatorY, indicatorH) {
+        this.overlayCtx.save();
+        this.overlayCtx.fillStyle = this.theme.text;
+        this.overlayCtx.font = '10px monospace';
+        this.overlayCtx.textAlign = 'right';
+        this.overlayCtx.textBaseline = 'middle';
+        [0, 30, 50, 70, 100].forEach(level => {
+            const y = indicatorY + indicatorH * (1 - level / 100);
+            this.overlayCtx.fillText(level.toString(), chartX - 5, y);
+        });
+        this.overlayCtx.restore();
+    }
+    renderDynamicOverlay() {
         if (!this.state.showCrosshair)
             return;
+        const w = this.app.screen.width;
+        const h = this.app.screen.height;
         const chartX = this.layout.marginLeft;
         const chartY = this.layout.marginTop;
-        const chartW = rect.width - this.layout.marginLeft - this.layout.marginRight;
-        const chartH = rect.height - this.layout.marginTop - this.layout.marginBottom;
+        const chartW = w - this.layout.marginLeft - this.layout.marginRight;
+        const chartH = h - this.layout.marginTop - this.layout.marginBottom;
         // Crosshair config
         const crosshairStyle = chartConfig.get('crosshair.style');
         const crosshairWidth = chartConfig.get('crosshair.width');
@@ -1060,6 +1163,16 @@ export class ChartEngine {
         if (this.state.crosshairCandle) {
             this.renderTooltip(this.state.crosshairCandle);
         }
+    }
+    renderOverlayOnly() {
+        // Nettoyer l'overlay canvas
+        const w = this.app.screen.width;
+        const h = this.app.screen.height;
+        this.overlayCtx.clearRect(0, 0, w, h);
+        // Redessiner les éléments statiques
+        this.renderStaticOverlay();
+        // Redessiner le crosshair dynamique
+        this.renderDynamicOverlay();
     }
     renderFloatingLabels(chartX, chartY, chartW, chartH) {
         // Label prix (Y)
