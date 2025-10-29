@@ -3,7 +3,6 @@
 /// Cette bibliothèque expose tous les modules nécessaires pour récupérer,
 /// stocker et interpoler des données de chandeliers depuis Binance
 // Déclaration des modules publics
-pub mod backfill;
 pub mod database;
 pub mod gap_filler;
 pub mod realtime;
