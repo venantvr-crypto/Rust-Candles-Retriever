@@ -44375,8 +44375,6 @@ async function loadPairs() {
         app.chart.setTimeframes(app.availableTimeframes);
         const savedTF = loadTimeframe();
         app.currentTimeframe = app.availableTimeframes.includes(savedTF) ? savedTF : app.availableTimeframes.includes("1d") ? "1d" : app.availableTimeframes[app.availableTimeframes.length - 1];
-        app.chart.state.viewStart = 0;
-        app.chart.state.viewEnd = 0;
         populateTimeframeDropdown();
         updateTimeframeDisplay();
         await loadCandles();
@@ -44483,14 +44481,16 @@ function populateTimeframeDropdown() {
     const newTF = e2.target.value;
     console.log(`\u{1F504} Manual TF change: ${app.currentTimeframe} \u2192 ${newTF}`);
     if (newTF !== app.currentTimeframe) {
+      const savedRange = app.chart && app.chart.state.data.length > 0 ? {
+        start: app.chart.state.viewStart,
+        end: app.chart.state.viewEnd
+      } : null;
       app.currentTimeframe = newTF;
       if (app.chart) {
         app.chart.state.currentTimeframe = newTF;
-        app.chart.state.viewStart = 0;
-        app.chart.state.viewEnd = 0;
       }
       saveTimeframe();
-      await loadCandles(null);
+      await loadCandles(savedRange);
     }
   };
 }
@@ -44517,7 +44517,7 @@ function initNavigationButtons() {
     return;
   }
   console.log("\u2705 Navigation buttons initialized");
-  navLeft.addEventListener("click", async () => {
+  navLeft.addEventListener("click", () => {
     console.log("\u25C0 Left navigation clicked");
     if (app.isLoading) {
       console.log("\u23F8\uFE0F  Skipping nav: loading");
@@ -44533,21 +44533,12 @@ function initNavigationButtons() {
     }
     const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
     const panAmount = viewWidth * 0.3;
-    const newStart = app.chart.state.viewStart - panAmount;
-    const newEnd = app.chart.state.viewEnd - panAmount;
     console.log(`\u2190 Panning left by ${panAmount}s`);
-    const earliestData = app.chart.state.data[0]?.time || 0;
-    const margin = viewWidth * 0.5;
-    if (newStart < earliestData + margin) {
-      console.log("\u{1F4E5} Loading more historical data...");
-      await loadCandles({ start: Math.floor(newStart - viewWidth), end: Math.ceil(newEnd) });
-    } else {
-      app.chart.state.viewStart = newStart;
-      app.chart.state.viewEnd = newEnd;
-      app.chart.render();
-    }
+    app.chart.state.viewStart -= panAmount;
+    app.chart.state.viewEnd -= panAmount;
+    app.chart.render();
   });
-  navRight.addEventListener("click", async () => {
+  navRight.addEventListener("click", () => {
     console.log("\u25B6 Right navigation clicked");
     if (app.isLoading) {
       console.log("\u23F8\uFE0F  Skipping nav: loading");
@@ -44563,19 +44554,10 @@ function initNavigationButtons() {
     }
     const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
     const panAmount = viewWidth * 0.3;
-    const newStart = app.chart.state.viewStart + panAmount;
-    const newEnd = app.chart.state.viewEnd + panAmount;
     console.log(`\u2192 Panning right by ${panAmount}s`);
-    const latestData = app.chart.state.data[app.chart.state.data.length - 1]?.time || 0;
-    const margin = viewWidth * 0.5;
-    if (newEnd > latestData - margin) {
-      console.log("\u{1F4E5} Loading more recent data...");
-      await loadCandles({ start: Math.floor(newStart), end: Math.ceil(newEnd + viewWidth) });
-    } else {
-      app.chart.state.viewStart = newStart;
-      app.chart.state.viewEnd = newEnd;
-      app.chart.render();
-    }
+    app.chart.state.viewStart += panAmount;
+    app.chart.state.viewEnd += panAmount;
+    app.chart.render();
   });
 }
 function initSettingsPanel() {
