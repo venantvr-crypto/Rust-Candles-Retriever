@@ -901,12 +901,11 @@ async fn main() -> std::io::Result<()> {
     println!("🔌 Gestionnaire WebSocket temps réel initialisé");
 
     // Initialiser le cache pour les requêtes de candles
-    // Optimisé pour les requêtes fréquentes de données historiques
     let candles_cache: Cache<CacheKey, Arc<Vec<Candle>>> = Cache::builder()
-        .max_capacity(5000) // Augmenté: 5000 requêtes uniques
-        .time_to_live(Duration::from_secs(300)) // Augmenté: 5 minutes
+        .max_capacity(1000)
+        .time_to_live(Duration::from_secs(60))
         .build();
-    println!("💾 Cache de candles initialisé (max 5000 entrées, TTL 5min)");
+    println!("💾 Cache de candles initialisé (max 1000 entrées, TTL 60s)");
 
     let app_state = web::Data::new(Mutex::new(AppState {
         db_dir,
