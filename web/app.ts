@@ -317,7 +317,7 @@ function initNavigationButtons(): void {
         if (newStart < earliestData + margin) {
             console.log('📥 Loading more historical data...');
             // Charger plus de données historiques
-            await loadCandles({start: Math.floor(newStart - viewWidth), end: Math.ceil(newEnd)});
+            await loadCandles({ start: Math.floor(newStart - viewWidth), end: Math.ceil(newEnd) });
         } else {
             // Assez de données en cache, juste pan
             app.chart.state.viewStart = newStart;
@@ -359,7 +359,7 @@ function initNavigationButtons(): void {
         if (newEnd > latestData - margin) {
             console.log('📥 Loading more recent data...');
             // Charger plus de données récentes
-            await loadCandles({start: Math.floor(newStart), end: Math.ceil(newEnd + viewWidth)});
+            await loadCandles({ start: Math.floor(newStart), end: Math.ceil(newEnd + viewWidth) });
         } else {
             // Assez de données en cache, juste pan
             app.chart.state.viewStart = newStart;
