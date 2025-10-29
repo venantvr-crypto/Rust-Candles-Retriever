@@ -80,8 +80,14 @@ pub struct RealtimeManager {
 
 /// Commandes pour le gestionnaire
 enum Command {
-    Subscribe { symbol: String, timeframe: String },
-    Unsubscribe { symbol: String, timeframe: String },
+    Subscribe {
+        symbol: String,
+        timeframe: String,
+    },
+    Unsubscribe {
+        symbol: String,
+        timeframe: String,
+    },
     #[allow(dead_code)]
     Shutdown,
 }
