@@ -5,6 +5,7 @@
 // Déclaration des modules publics
 pub mod database;
 pub mod gap_filler;
+pub mod realtime;
 pub mod retriever;
 pub mod timeframe_status;
 pub mod utils;

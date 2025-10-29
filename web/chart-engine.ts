@@ -25,6 +25,10 @@ export class ChartEngine {
     rsiVisibility: Map<string, boolean>;
     legendContainer: HTMLDivElement;
     overlayParams: any;
+    realtimeCandles: Map<string, any>; // TF → candle en cours
+    realtimePolling: number | null; // Timer ID pour polling
+    realtimeSubscribed: Set<string>; // Streams déjà souscrits (symbol:tf)
+    realtimeUpdating: boolean; // Flag pour éviter appels concurrents
 
     private constructor(container: HTMLElement, app: PIXI.Application, options: ChartOptions = {}) {
         this.container = container;
@@ -99,6 +103,12 @@ export class ChartEngine {
         // Indicateurs multi-timeframes
         this.rsiData = new Map();
         this.rsiVisibility = new Map();
+
+        // Polling temps réel
+        this.realtimeCandles = new Map();
+        this.realtimePolling = null;
+        this.realtimeSubscribed = new Set();
+        this.realtimeUpdating = false;
 
         // Conteneur pour légendes interactives
         this.legendContainer = document.createElement('div');
@@ -548,6 +558,14 @@ export class ChartEngine {
     }
 
     async loadData(symbol, timeframe, savedRange = null) {
+        console.log(`📊 loadData() called: symbol=${symbol}, TF=${timeframe}, isLoading=${this.state.isLoading}`);
+
+        // Éviter les appels concurrents
+        if (this.state.isLoading) {
+            console.warn('⚠️ Already loading data, ignoring loadData() call');
+            return;
+        }
+
         // Sauvegarder la plage temporelle exacte si on change de TF
         if (savedRange === null && this.state.data.length > 0 && this.state.viewStart !== 0) {
             savedRange = {
@@ -586,7 +604,7 @@ export class ChartEngine {
 
             console.log(`📡 Fetching data range: ${fetchStart ? new Date(fetchStart * 1000).toISOString().substring(0, 16) : 'auto'} → ${fetchEnd ? new Date(fetchEnd * 1000).toISOString().substring(0, 16) : 'auto'}`);
 
-            const data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
+            let data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
 
             if (!Array.isArray(data) || data.length === 0) {
                 throw new Error('No data received');
@@ -594,6 +612,14 @@ export class ChartEngine {
 
             this.state.data = data;
             console.log(`✅ Loaded ${data.length} candles for ${symbol} ${timeframe}`);
+
+            // Détecter et combler les gaps si nécessaire
+            const didFetch = await this.fillGapsIfNeeded(symbol, timeframe, data);
+            if (didFetch) {
+                data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
+                this.state.data = data;
+                console.log(`🔄 Reloaded ${data.length} candles après fetch`);
+            }
 
             // Calculer prix min/max global
             const prices = data.flatMap(c => [c.high, c.low]);
@@ -614,11 +640,301 @@ export class ChartEngine {
             this.renderBackground();
             this.render();
 
+            // Démarrer/mettre à jour WebSocket (ne fait rien si config inchangée)
+            this.startRealtimeUpdates();
+
         } catch (error) {
             this.callbacks.onError(error);
             this.renderError(error.message);
         } finally {
             this.state.isLoading = false;
+        }
+    }
+
+    async fillGapsIfNeeded(symbol: string, timeframe: string, data: any[]): Promise<boolean> {
+        if (data.length === 0) return false;
+
+        const lastCandle = data[data.length - 1];
+        const now = Math.floor(Date.now() / 1000);
+        const gapSeconds = now - lastCandle.time;
+        const tfSeconds = this.parseTimeframeToSeconds(timeframe);
+        const missingCandles = gapSeconds / tfSeconds;
+
+        // Seuil: > 2 bougies manquantes (laisse marge pour bougie en cours)
+        if (missingCandles > 2) {
+            console.log(`🔍 Gap détecté: ${Math.floor(missingCandles)} bougies manquantes, fetch...`);
+
+            try {
+                const response = await fetch(`/api/fetch?symbol=${symbol}&timeframe=${timeframe}`, {
+                    method: 'POST'
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    if (result.inserted > 0) {
+                        console.log(`✅ ${result.inserted} bougies ajoutées`);
+                        return true;
+                    }
+                }
+            } catch (error) {
+                console.error('❌ Erreur fetch:', error);
+            }
+        }
+        return false;
+    }
+
+    async startRealtimeUpdates() {
+        if (!this.state.symbol) {
+            console.warn('⚠️ Cannot start realtime updates: no symbol');
+            return;
+        }
+
+        // Éviter les appels concurrents
+        if (this.realtimeUpdating) {
+            console.log('⏭️  Already updating realtime, skipping');
+            return;
+        }
+
+        this.realtimeUpdating = true;
+
+        try {
+            // Déterminer les TF à surveiller = celles affichées pour le RSI
+            const currentIdx = this.timeframes.indexOf(this.state.currentTimeframe);
+            const watchedTFs = new Set<string>();
+
+            // TF inférieure (RSI)
+            if (currentIdx > 0) {
+                watchedTFs.add(this.timeframes[currentIdx - 1]);
+            }
+
+            // TF actuelle (affichage + RSI)
+            watchedTFs.add(this.state.currentTimeframe);
+
+            // TF supérieure (RSI)
+            if (currentIdx < this.timeframes.length - 1) {
+                watchedTFs.add(this.timeframes[currentIdx + 1]);
+            }
+
+            const tfArray = Array.from(watchedTFs).sort((a, b) =>
+                this.parseTimeframeToSeconds(a) - this.parseTimeframeToSeconds(b)
+            );
+
+            // Identifier les nouveaux streams à souscrire
+            const newStreams: string[] = [];
+            for (const tf of tfArray) {
+                const streamKey = `${this.state.symbol}:${tf}`;
+                if (!this.realtimeSubscribed.has(streamKey)) {
+                    newStreams.push(tf);
+                    this.realtimeSubscribed.add(streamKey);
+                }
+            }
+
+            // Souscrire uniquement aux nouveaux streams
+            if (newStreams.length > 0) {
+                console.log(`🔌 Subscribing to new streams for ${this.state.symbol}: ${newStreams.join(', ')}`);
+
+                try {
+                    const subscribeUrl = `/api/realtime/subscribe?symbol=${this.state.symbol}&timeframes=${newStreams.join(',')}`;
+                    const subscribeResponse = await fetch(subscribeUrl, {method: 'POST'});
+
+                    if (subscribeResponse.ok) {
+                        console.log(`✅ Subscribed to ${newStreams.length} new stream(s)`);
+                    } else {
+                        console.error('Failed to subscribe:', subscribeResponse.statusText);
+                    }
+                } catch (error) {
+                    console.error('Subscribe error:', error);
+                }
+            } else {
+                console.log(`♻️  Already subscribed to all required streams`);
+            }
+
+            // Arrêter le polling existant
+            if (this.realtimePolling) {
+                clearInterval(this.realtimePolling);
+                this.realtimePolling = null;
+            }
+
+            // Fonction de polling (lecture seule)
+            const poll = async () => {
+                try {
+                    const url = `/api/realtime/candles?symbol=${this.state.symbol}&timeframes=${tfArray.join(',')}`;
+                    const response = await fetch(url);
+
+                    if (!response.ok) {
+                        console.error('Failed to fetch realtime candles:', response.statusText);
+                        return;
+                    }
+
+                    const data = await response.json();
+
+                    // Traiter les bougies reçues (sans render pour éviter 3 renders)
+                    let needsRender = false;
+                    for (const [tf, candle] of Object.entries(data)) {
+                        if (candle) {
+                            const updated = this.handleRealtimeCandle(tf, candle as any, (candle as any).is_closed, false);
+                            if (updated) needsRender = true;
+                        }
+                    }
+
+                    // Render une seule fois après avoir traité toutes les bougies
+                    if (needsRender) {
+                        this.render();
+                    }
+                } catch (error) {
+                    console.error('Realtime polling error:', error);
+                }
+            };
+
+            // Polling initial après 500ms (laisser temps à la souscription si nouveaux streams)
+            if (newStreams.length > 0) {
+                setTimeout(poll, 500);
+            } else {
+                poll(); // Immédiat si déjà souscrit
+            }
+
+            // Polling toutes les 2 secondes
+            this.realtimePolling = window.setInterval(poll, 2000);
+
+        } finally {
+            this.realtimeUpdating = false;
+        }
+    }
+
+    stopRealtimeUpdates() {
+        if (this.realtimePolling) {
+            clearInterval(this.realtimePolling);
+            this.realtimePolling = null;
+        }
+        this.realtimeCandles.clear();
+        // NE PAS vider realtimeSubscribed - on garde les souscriptions actives
+        console.log('🛑 Stopped realtime polling');
+    }
+
+    handleRealtimeCandle(timeframe: string, candle: any, isComplete: boolean, shouldRender: boolean = true): boolean {
+        // Mettre à jour la bougie en cours pour cette TF
+        this.realtimeCandles.set(timeframe, candle);
+
+        let updated = false;
+
+        // Si c'est la TF actuelle affichée
+        if (timeframe === this.state.currentTimeframe) {
+            // Trouver l'index de la dernière bougie
+            const lastIndex = this.state.data.length - 1;
+            if (lastIndex >= 0) {
+                const lastCandle = this.state.data[lastIndex];
+                const tfSeconds = this.parseTimeframeToSeconds(timeframe);
+
+                // Vérifier si c'est la même bougie (même timestamp)
+                if (lastCandle.time === candle.time) {
+                    // Mise à jour de la bougie existante
+                    this.state.data[lastIndex] = candle;
+                    updated = true;
+                } else if (candle.time === lastCandle.time + tfSeconds) {
+                    // Nouvelle bougie consécutive → l'ajouter
+                    this.state.data.push(candle);
+                    console.log(`✅ New candle added for ${timeframe} at ${new Date(candle.time * 1000).toISOString().substring(0, 16)}`);
+
+                    // Si on affiche les dernières données, ajuster la vue pour suivre
+                    const isAtEnd = this.state.viewEnd >= (lastCandle.time + tfSeconds * 0.5);
+                    if (isAtEnd) {
+                        // Décaler la vue pour suivre
+                        const viewWidth = this.state.viewEnd - this.state.viewStart;
+                        this.state.viewEnd = candle.time + tfSeconds;
+                        this.state.viewStart = this.state.viewEnd - viewWidth;
+                        console.log(`📍 Auto-scroll: view moved to ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
+                    }
+                    updated = true;
+                } else if (candle.time > lastCandle.time + tfSeconds) {
+                    // Gap détecté mais on ne reload PAS : les bougies intermédiaires sont simplement manquantes
+                    // Le WebSocket n'envoie que la bougie actuelle, pas l'historique
+                    console.log(`📍 Skipping gap (${Math.floor((candle.time - lastCandle.time - tfSeconds) / tfSeconds)} candles missing), adding current candle`);
+                    this.state.data.push(candle);
+                    updated = true;
+                }
+
+                if (updated) {
+                    // Recalculer le RSI de manière incrémentale
+                    this.updateRealtimeRSI();
+
+                    // Re-render seulement si demandé
+                    if (shouldRender) {
+                        this.render();
+                    }
+                }
+            }
+        } else {
+            // Pour les autres TF (utilisées pour le RSI), on ne met PAS à jour en temps réel
+            // car updateSingleTimeframeRSI() est trop lourd (fetch + recalcul complet)
+            // Le RSI sera mis à jour au prochain changement de TF ou zoom/pan
+            if (isComplete) {
+                console.log(`📊 Complete candle on ${timeframe} (RSI update skipped for performance)`);
+                updated = true;
+            }
+        }
+
+        return updated;
+    }
+
+    async updateSingleTimeframeRSI(timeframe: string) {
+        if (!chartConfig.get('indicators.enabled')) return;
+
+        const period = chartConfig.get('indicators.rsi.period') || 14;
+
+        try {
+            // Charger avec marge
+            const margin = (this.state.viewEnd - this.state.viewStart) * 2;
+            const data = await this.callbacks.onLoadData(
+                this.state.symbol,
+                timeframe,
+                Math.floor(this.state.viewStart - margin),
+                Math.ceil(this.state.viewEnd + margin)
+            );
+
+            if (data && data.length > period) {
+                const rsi = this.calculateRSI(data, period);
+                const referenceTimestamps = this.state.data.map(c => c.time);
+                const resampled = this.resampleIndicatorToGrid(rsi, referenceTimestamps);
+                this.rsiData.set(timeframe, resampled);
+                console.log(`📊 Updated RSI for ${timeframe} (${resampled.length} points)`);
+
+                // Re-render pour afficher le nouveau RSI
+                this.render();
+            }
+        } catch (e) {
+            console.error(`❌ Failed to update RSI for ${timeframe}:`, e);
+        }
+    }
+
+    updateRealtimeRSI() {
+        if (!chartConfig.get('indicators.enabled')) return;
+
+        const period = chartConfig.get('indicators.rsi.period') || 14;
+
+        // Optimisation : limiter à period*2 derniers échantillons (28 pour period=14)
+        // Suffisant pour RSI précis (14 warm-up + 14 calcul)
+        if (this.state.data.length > period + 1) {
+            const maxSamples = period * 2;
+
+            // Prendre seulement les dernières bougies nécessaires
+            const dataToUse = this.state.data.length > maxSamples
+                ? this.state.data.slice(-maxSamples)
+                : this.state.data;
+
+            const rsi = this.calculateRSI(dataToUse, period);
+
+            // Mettre à jour seulement les derniers points du RSI existant
+            const existingRSI = this.rsiData.get(this.state.currentTimeframe) || [];
+            const rsiPointsToReplace = Math.min(rsi.length, 10); // Remplacer max 10 derniers points
+
+            if (existingRSI.length > rsiPointsToReplace) {
+                // Garder le début, remplacer la fin
+                const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
+                this.rsiData.set(this.state.currentTimeframe, updatedRSI);
+            } else {
+                // Pas assez de données existantes, tout remplacer
+                this.rsiData.set(this.state.currentTimeframe, rsi);
+            }
         }
     }
 
@@ -669,7 +985,7 @@ export class ChartEngine {
                 // Charger avec marge large pour avoir assez de données
                 const margin = (this.state.viewEnd - this.state.viewStart) * 2;
                 console.log(`📊 Loading ${tf} data for RSI (${this.state.symbol})...`);
-                const data = await this.callbacks.onLoadData(
+                let data = await this.callbacks.onLoadData(
                     this.state.symbol,
                     tf,
                     Math.floor(this.state.viewStart - margin),
@@ -953,6 +1269,10 @@ export class ChartEngine {
         const hollowUp = chartConfig.get('candles.hollowUp');
         const minBodyHeight = chartConfig.get('candles.minBodyHeight');
 
+        // Identifier la bougie temps réel (dernière bougie si elle vient du WS)
+        const realtimeCandle = this.realtimeCandles.get(this.state.currentTimeframe);
+        const realtimeCandleTime = realtimeCandle?.time || null;
+
         visibleCandles.forEach(candle => {
             const x = timeToX(candle.time);
             const yOpen = priceToY(candle.open);
@@ -965,6 +1285,16 @@ export class ChartEngine {
             const borderColor = parseInt(isUp ? this.theme.upBorderColor.replace('#', '') : this.theme.downBorderColor.replace('#', ''), 16);
 
             const candleGraphics = new PIXI.Graphics();
+
+            // Marqueur WebSocket (trait gris sous la bougie)
+            const isRealtimeCandle = realtimeCandleTime !== null && candle.time === realtimeCandleTime;
+            if (isRealtimeCandle) {
+                const markerY = yLow + 8;
+                candleGraphics.lineStyle(2, 0x808080, 0.6);
+                candleGraphics.moveTo(x - candleWidth / 2, markerY);
+                candleGraphics.lineTo(x + candleWidth / 2, markerY);
+                candleGraphics.stroke();
+            }
 
             // Mèche
             candleGraphics.lineStyle(wickWidth, color, 1);
@@ -1491,8 +1821,25 @@ export class ChartEngine {
     renderTooltip(candle) {
         const padding = 8;
         const lineHeight = 16;
+
+        // Formater la date avec timezone
+        const date = new Date(candle.time * 1000);
+        const utcStr = date.toISOString().substring(0, 19).replace('T', ' ') + ' UTC';
+
+        // Conversion en Europe/Paris
+        const parisStr = date.toLocaleString('fr-FR', {
+            timeZone: 'Europe/Paris',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        }) + ' CET/CEST';
+
         const lines = [
-            `Time: ${new Date(candle.time * 1000).toISOString().substring(0, 16).replace('T', ' ')}`,
+            `Time: ${utcStr}`,
+            `      ${parisStr}`,
             `Open:  ${candle.open.toFixed(2)}`,
             `High:  ${candle.high.toFixed(2)}`,
             `Low:   ${candle.low.toFixed(2)}`,
@@ -1576,6 +1923,7 @@ export class ChartEngine {
 
     destroy() {
         // Cleanup
+        this.stopRealtimeUpdates();
         this.app.destroy(true, {children: true, texture: true});
         this.overlayCanvas.remove();
         this.legendContainer.remove();

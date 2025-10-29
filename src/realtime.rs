@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 /// Module de gestion des bougies temps réel via WebSocket Binance
 ///
 /// Architecture:
@@ -10,7 +11,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use futures_util::StreamExt;
 
 /// Bougie partielle temps réel
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,18 +89,16 @@ impl RealtimeManager {
 
     /// Souscrit à un stream (symbol, timeframe)
     pub fn subscribe(&self, symbol: String, timeframe: String) {
-        let _ = self.command_tx.send(Command::Subscribe {
-            symbol,
-            timeframe,
-        });
+        let _ = self
+            .command_tx
+            .send(Command::Subscribe { symbol, timeframe });
     }
 
     /// Se désabonne d'un stream
     pub fn unsubscribe(&self, symbol: String, timeframe: String) {
-        let _ = self.command_tx.send(Command::Unsubscribe {
-            symbol,
-            timeframe,
-        });
+        let _ = self
+            .command_tx
+            .send(Command::Unsubscribe { symbol, timeframe });
     }
 
     /// Récupère les bougies partielles pour des (symbol, timeframes)
@@ -181,11 +179,7 @@ impl RealtimeManager {
         timeframe: String,
     ) {
         let binance_interval = Self::to_binance_interval(&timeframe);
-        let stream_name = format!(
-            "{}@kline_{}",
-            symbol.to_lowercase(),
-            binance_interval
-        );
+        let stream_name = format!("{}@kline_{}", symbol.to_lowercase(), binance_interval);
         let url = format!("wss://stream.binance.com:9443/ws/{}", stream_name);
 
         loop {
@@ -201,8 +195,7 @@ impl RealtimeManager {
                     while let Some(msg) = read.next().await {
                         match msg {
                             Ok(Message::Text(text)) => {
-                                if let Ok(event) =
-                                    serde_json::from_str::<BinanceKlineEvent>(&text)
+                                if let Ok(event) = serde_json::from_str::<BinanceKlineEvent>(&text)
                                 {
                                     if event.event_type == "kline" {
                                         let candle = RealtimeCandle {
