@@ -888,8 +888,8 @@ export class ChartEngine {
                 }
 
                 if (updated) {
-                    // Recalculer le RSI de manière incrémentale
-                    this.updateRealtimeRSI();
+                    // Recalculer le RSI pour toutes les TF visibles (pas seulement currentTimeframe)
+                    this.updateRealtimeRSIForAllTimeframes();
 
                     // Planifier render seulement si demandé
                     if (shouldRender) {
@@ -972,6 +972,111 @@ export class ChartEngine {
         }
     }
 
+    updateRealtimeRSIForAllTimeframes() {
+        if (!chartConfig.get('indicators.enabled')) return;
+
+        const period = chartConfig.get('indicators.rsi.period') || 14;
+        const currentTFSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
+
+        // Itérer sur toutes les TF pour lesquelles on a du RSI
+        for (const [tf, existingRSI] of this.rsiData.entries()) {
+            try {
+                const tfSeconds = this.parseTimeframeToSeconds(tf);
+
+                // Récupérer la bougie temps-réel pour cette TF
+                const realtimeCandle = this.realtimeCandles.get(tf);
+
+                // Toujours utiliser la bougie temps-réel si disponible (considérée comme complète)
+                if (!realtimeCandle) {
+                    // Si on n'a pas de bougie temps-réel, on saute cette TF
+                    continue;
+                }
+
+                // Construire les données pour le calcul : on prend les données de state.data
+                // et on les utilise pour construire les échantillons pour cette TF
+                // On va chercher dans le cache historique (rsiHistoricalData) si disponible
+                if (!this.rsiHistoricalData) {
+                    this.rsiHistoricalData = new Map();
+                }
+
+                // Si on n'a pas de données historiques pour cette TF, on lance un chargement asynchrone
+                if (!this.rsiHistoricalData.has(tf)) {
+                    // Lancer le chargement en arrière-plan (ne pas attendre)
+                    this.loadHistoricalDataForRSI(tf, period);
+                    continue;
+                }
+
+                // Récupérer les données historiques du cache
+                let data = this.rsiHistoricalData.get(tf) || [];
+
+                // Limiter aux 28 derniers échantillons
+                const maxSamples = period * 2; // 28 pour period=14
+                data = data.slice(-maxSamples);
+
+                // Ajouter ou mettre à jour avec la bougie temps-réel
+                if (data.length > 0) {
+                    const lastHistorical = data[data.length - 1];
+                    if (lastHistorical.time === realtimeCandle.time) {
+                        // Remplacer la dernière bougie par la version temps-réel
+                        data[data.length - 1] = realtimeCandle;
+                    } else if (realtimeCandle.time > lastHistorical.time) {
+                        // Ajouter la bougie temps-réel si elle est plus récente
+                        data.push(realtimeCandle);
+                        // Limiter à nouveau après ajout
+                        data = data.slice(-maxSamples);
+                        // Mettre à jour le cache
+                        this.rsiHistoricalData.set(tf, data);
+                    }
+                }
+
+                // Calculer le RSI sur ces données
+                if (data.length > period + 1) {
+                    const rsi = this.calculateRSI(data, period);
+
+                    // Mettre à jour seulement les derniers points du RSI existant
+                    const rsiPointsToReplace = Math.min(rsi.length, 10);
+
+                    if (existingRSI.length > rsiPointsToReplace) {
+                        // Garder le début, remplacer la fin
+                        const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
+                        this.rsiData.set(tf, updatedRSI);
+                    } else {
+                        // Pas assez de données existantes, tout remplacer
+                        this.rsiData.set(tf, rsi);
+                    }
+                }
+            } catch (e) {
+                console.error(`❌ Failed to update realtime RSI for ${tf}:`, e);
+            }
+        }
+    }
+
+    async loadHistoricalDataForRSI(tf: string, period: number) {
+        try {
+            const maxSamples = period * 2; // 28 pour period=14
+            const tfSeconds = this.parseTimeframeToSeconds(tf);
+            const margin = tfSeconds * maxSamples;
+
+            const data = await this.callbacks.onLoadData(
+                this.state.symbol,
+                tf,
+                Math.floor(Date.now() / 1000 - margin),
+                Math.ceil(Date.now() / 1000)
+            );
+
+            if (data && data.length > 0) {
+                // Stocker dans le cache
+                if (!this.rsiHistoricalData) {
+                    this.rsiHistoricalData = new Map();
+                }
+                this.rsiHistoricalData.set(tf, data.slice(-maxSamples));
+                console.log(`📊 Loaded ${data.length} historical candles for ${tf} RSI calculation`);
+            }
+        } catch (e) {
+            console.error(`❌ Failed to load historical data for ${tf}:`, e);
+        }
+    }
+
     async loadIndicatorData() {
         console.log(`📊 loadIndicatorData() called - enabled: ${chartConfig.get('indicators.enabled')}, symbol: ${this.state.symbol}, data: ${this.state.data.length} candles`);
 
@@ -988,6 +1093,11 @@ export class ChartEngine {
 
         // Clear anciennes données RSI
         this.rsiData.clear();
+
+        // Initialiser le cache des données historiques pour le RSI temps-réel
+        if (!this.rsiHistoricalData) {
+            this.rsiHistoricalData = new Map();
+        }
 
         // Auto: TF inférieure, actuelle, et supérieure (max 3)
         const currentIdx = this.timeframes.indexOf(this.state.currentTimeframe);
@@ -1029,6 +1139,10 @@ export class ChartEngine {
                 console.log(`📊 Loaded ${data?.length || 0} candles for ${tf}`);
 
                 if (data && data.length > period) {
+                    // Stocker les données historiques dans le cache pour les mises à jour temps-réel
+                    const maxSamples = period * 2; // 28 pour period=14
+                    this.rsiHistoricalData.set(tf, data.slice(-maxSamples));
+
                     const rsi = this.calculateRSI(data, period);
                     console.log(`📊 Calculated ${rsi.length} RSI points for ${tf}`);
 

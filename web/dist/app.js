@@ -43388,7 +43388,7 @@ var ChartEngine = class _ChartEngine {
           updated = true;
         }
         if (updated) {
-          this.updateRealtimeRSI();
+          this.updateRealtimeRSIForAllTimeframes();
           if (shouldRender) {
             this.scheduleRender();
           }
@@ -43442,6 +43442,74 @@ var ChartEngine = class _ChartEngine {
       }
     }
   }
+  updateRealtimeRSIForAllTimeframes() {
+    if (!chartConfig.get("indicators.enabled")) return;
+    const period = chartConfig.get("indicators.rsi.period") || 14;
+    const currentTFSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
+    for (const [tf, existingRSI] of this.rsiData.entries()) {
+      try {
+        const tfSeconds = this.parseTimeframeToSeconds(tf);
+        const realtimeCandle = this.realtimeCandles.get(tf);
+        if (!realtimeCandle) {
+          continue;
+        }
+        if (!this.rsiHistoricalData) {
+          this.rsiHistoricalData = /* @__PURE__ */ new Map();
+        }
+        if (!this.rsiHistoricalData.has(tf)) {
+          this.loadHistoricalDataForRSI(tf, period);
+          continue;
+        }
+        let data = this.rsiHistoricalData.get(tf) || [];
+        const maxSamples = period * 2;
+        data = data.slice(-maxSamples);
+        if (data.length > 0) {
+          const lastHistorical = data[data.length - 1];
+          if (lastHistorical.time === realtimeCandle.time) {
+            data[data.length - 1] = realtimeCandle;
+          } else if (realtimeCandle.time > lastHistorical.time) {
+            data.push(realtimeCandle);
+            data = data.slice(-maxSamples);
+            this.rsiHistoricalData.set(tf, data);
+          }
+        }
+        if (data.length > period + 1) {
+          const rsi = this.calculateRSI(data, period);
+          const rsiPointsToReplace = Math.min(rsi.length, 10);
+          if (existingRSI.length > rsiPointsToReplace) {
+            const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
+            this.rsiData.set(tf, updatedRSI);
+          } else {
+            this.rsiData.set(tf, rsi);
+          }
+        }
+      } catch (e2) {
+        console.error(`\u274C Failed to update realtime RSI for ${tf}:`, e2);
+      }
+    }
+  }
+  async loadHistoricalDataForRSI(tf, period) {
+    try {
+      const maxSamples = period * 2;
+      const tfSeconds = this.parseTimeframeToSeconds(tf);
+      const margin = tfSeconds * maxSamples;
+      const data = await this.callbacks.onLoadData(
+        this.state.symbol,
+        tf,
+        Math.floor(Date.now() / 1e3 - margin),
+        Math.ceil(Date.now() / 1e3)
+      );
+      if (data && data.length > 0) {
+        if (!this.rsiHistoricalData) {
+          this.rsiHistoricalData = /* @__PURE__ */ new Map();
+        }
+        this.rsiHistoricalData.set(tf, data.slice(-maxSamples));
+        console.log(`\u{1F4CA} Loaded ${data.length} historical candles for ${tf} RSI calculation`);
+      }
+    } catch (e2) {
+      console.error(`\u274C Failed to load historical data for ${tf}:`, e2);
+    }
+  }
   async loadIndicatorData() {
     console.log(`\u{1F4CA} loadIndicatorData() called - enabled: ${chartConfig.get("indicators.enabled")}, symbol: ${this.state.symbol}, data: ${this.state.data.length} candles`);
     if (!chartConfig.get("indicators.enabled")) {
@@ -43454,6 +43522,9 @@ var ChartEngine = class _ChartEngine {
       return;
     }
     this.rsiData.clear();
+    if (!this.rsiHistoricalData) {
+      this.rsiHistoricalData = /* @__PURE__ */ new Map();
+    }
     const currentIdx = this.timeframes.indexOf(this.state.currentTimeframe);
     const rsiTimeframes = [];
     if (currentIdx > 0) {
@@ -43479,6 +43550,8 @@ var ChartEngine = class _ChartEngine {
         );
         console.log(`\u{1F4CA} Loaded ${data?.length || 0} candles for ${tf}`);
         if (data && data.length > period) {
+          const maxSamples = period * 2;
+          this.rsiHistoricalData.set(tf, data.slice(-maxSamples));
           const rsi = this.calculateRSI(data, period);
           console.log(`\u{1F4CA} Calculated ${rsi.length} RSI points for ${tf}`);
           const resampled = this.resampleIndicatorToGrid(rsi, referenceTimestamps);
@@ -43994,7 +44067,23 @@ var ChartEngine = class _ChartEngine {
   }
   renderStaticOverlay() {
     if (!this.overlayParams) return;
-    const { w: w2, h: h2, priceMin, priceMax, priceRange, priceToY, chartX, chartY, chartW, chartH, visibleCandles, volumeHeight, indicatorH, indicatorY, timeToX } = this.overlayParams;
+    const {
+      w: w2,
+      h: h2,
+      priceMin,
+      priceMax,
+      priceRange,
+      priceToY,
+      chartX,
+      chartY,
+      chartW,
+      chartH,
+      visibleCandles,
+      volumeHeight,
+      indicatorH,
+      indicatorY,
+      timeToX
+    } = this.overlayParams;
     this.renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH);
     this.renderTimeAxis(w2, h2);
     if (chartConfig.get("lastPrice.enabled") && visibleCandles.length > 0) {
