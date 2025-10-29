@@ -72,8 +72,6 @@ pub struct RealtimeManager {
     command_tx: mpsc::UnboundedSender<Command>,
     /// Canal de broadcast pour les mises à jour de bougies
     broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
-    /// Répertoire des bases de données (pour sauvegarder bougies complètes)
-    db_dir: String,
 }
 
 /// Commandes pour le gestionnaire
@@ -85,25 +83,23 @@ enum Command {
 
 impl RealtimeManager {
     /// Crée un nouveau gestionnaire et lance le thread de gestion
-    pub fn new(db_dir: String) -> Self {
+    pub fn new() -> Self {
         let cache = Arc::new(RwLock::new(HashMap::new()));
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
         let manager_cache = Arc::clone(&cache);
         let manager_broadcast = broadcast_tx.clone();
-        let manager_db_dir = db_dir.clone();
 
         // Lancer le thread de gestion en arrière-plan
         tokio::spawn(async move {
-            Self::run_manager(manager_cache, command_rx, manager_broadcast, manager_db_dir).await;
+            Self::run_manager(manager_cache, command_rx, manager_broadcast).await;
         });
 
         Self {
             cache,
             command_tx,
             broadcast_tx,
-            db_dir,
         }
     }
 
@@ -148,7 +144,6 @@ impl RealtimeManager {
         cache: Arc<RwLock<HashMap<StreamKey, RealtimeCandle>>>,
         mut command_rx: mpsc::UnboundedReceiver<Command>,
         broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
-        db_dir: String,
     ) {
         let mut active_streams: HashMap<StreamKey, tokio::task::JoinHandle<()>> = HashMap::new();
 
@@ -168,7 +163,6 @@ impl RealtimeManager {
                     let stream_symbol = symbol.clone();
                     let stream_tf = timeframe.clone();
                     let stream_broadcast = broadcast_tx.clone();
-                    let stream_db_dir = db_dir.clone();
 
                     // Lancer une task pour ce stream
                     let handle = tokio::spawn(async move {
@@ -177,7 +171,6 @@ impl RealtimeManager {
                             stream_symbol,
                             stream_tf,
                             stream_broadcast,
-                            stream_db_dir,
                         )
                         .await;
                     });
@@ -214,7 +207,6 @@ impl RealtimeManager {
         symbol: String,
         timeframe: String,
         broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
-        db_dir: String,
     ) {
         let binance_interval = Self::to_binance_interval(&timeframe);
         let stream_name = format!("{}@kline_{}", symbol.to_lowercase(), binance_interval);
@@ -250,31 +242,6 @@ impl RealtimeManager {
                                         let key = (symbol.clone(), timeframe.clone());
                                         cache.write().unwrap().insert(key, candle.clone());
 
-                                        // Si la bougie est complète, la sauvegarder en base
-                                        if candle.is_closed {
-                                            let save_symbol = symbol.clone();
-                                            let save_tf = timeframe.clone();
-                                            let save_candle = candle.clone();
-                                            let save_db_dir = db_dir.clone();
-
-                                            // Spawn task pour éviter de bloquer le stream
-                                            tokio::spawn(async move {
-                                                if let Err(e) = Self::save_completed_candle(
-                                                    &save_db_dir,
-                                                    &save_symbol,
-                                                    &save_tf,
-                                                    &save_candle,
-                                                )
-                                                .await
-                                                {
-                                                    eprintln!(
-                                                        "❌ Erreur sauvegarde bougie {} {}: {}",
-                                                        save_symbol, save_tf, e
-                                                    );
-                                                }
-                                            });
-                                        }
-
                                         // Broadcaster la mise à jour aux clients WebSocket
                                         let update = CandleUpdate {
                                             symbol: symbol.clone(),
@@ -305,90 +272,6 @@ impl RealtimeManager {
             // Attendre avant de reconnecter
             println!("⏰ Reconnecting to {} in 5s...", stream_name);
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        }
-    }
-
-    /// Sauvegarde une bougie complète dans la base de données
-    async fn save_completed_candle(
-        db_dir: &str,
-        symbol: &str,
-        timeframe: &str,
-        candle: &RealtimeCandle,
-    ) -> anyhow::Result<()> {
-        use rusqlite::{Connection, params};
-        use std::path::PathBuf;
-
-        // Calculer close_time (open_time + intervalle - 1 seconde)
-        let interval_seconds = Self::timeframe_to_seconds(timeframe);
-        let close_time = candle.time + interval_seconds - 1;
-
-        // Ouvrir la base de données pour ce symbole
-        let db_path = PathBuf::from(db_dir).join(format!("{}.db", symbol));
-
-        // Cloner les valeurs pour le move dans spawn_blocking
-        let symbol_owned = symbol.to_string();
-        let timeframe_owned = timeframe.to_string();
-        let candle_time = candle.time;
-        let candle_open = candle.open;
-        let candle_high = candle.high;
-        let candle_low = candle.low;
-        let candle_close = candle.close;
-        let candle_volume = candle.volume;
-
-        // Exécuter en blocking pool car SQLite est synchrone
-        tokio::task::spawn_blocking(move || {
-            let conn = Connection::open(&db_path)?;
-
-            // INSERT OR IGNORE pour éviter les doublons
-            conn.execute(
-                "INSERT OR IGNORE INTO candlesticks (
-                    provider, symbol, timeframe, open_time, open, high, low, close, volume,
-                    close_time, quote_asset_volume, number_of_trades,
-                    taker_buy_base_asset_volume, taker_buy_quote_asset_volume, interpolated
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                params![
-                    "binance",
-                    symbol_owned,
-                    timeframe_owned,
-                    candle_time,
-                    candle_open,
-                    candle_high,
-                    candle_low,
-                    candle_close,
-                    candle_volume,
-                    close_time,
-                    0.0, // quote_asset_volume (non fourni par WebSocket)
-                    0,   // number_of_trades (non fourni par WebSocket)
-                    0.0, // taker_buy_base_asset_volume
-                    0.0, // taker_buy_quote_asset_volume
-                    0,   // interpolated = false
-                ],
-            )?;
-
-            println!(
-                "💾 Bougie complète sauvegardée: {} {} @ {}",
-                symbol_owned,
-                timeframe_owned,
-                chrono::DateTime::from_timestamp(candle_time, 0)
-                    .unwrap()
-                    .format("%Y-%m-%d %H:%M:%S")
-            );
-
-            Ok::<(), anyhow::Error>(())
-        })
-        .await?
-    }
-
-    /// Convertit une timeframe en secondes
-    fn timeframe_to_seconds(tf: &str) -> i64 {
-        let num: i64 = tf[..tf.len() - 1].parse().unwrap_or(1);
-        let unit = &tf[tf.len() - 1..];
-
-        match unit {
-            "m" => num * 60,
-            "h" => num * 3600,
-            "d" => num * 86400,
-            _ => 60,
         }
     }
 

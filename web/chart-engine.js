@@ -663,8 +663,8 @@ class ChartEngine {
             const color = isUp ? this.theme.upColor : this.theme.downColor;
             const borderColor = isUp ? this.theme.upBorderColor : this.theme.downBorderColor;
 
-            // Mèche (utilise borderColor pour cohérence avec bordure)
-            this.mainCtx.strokeStyle = borderColor;
+            // Mèche
+            this.mainCtx.strokeStyle = color;
             this.mainCtx.lineWidth = wickWidth;
             this.mainCtx.beginPath();
             this.mainCtx.moveTo(x, yHigh);

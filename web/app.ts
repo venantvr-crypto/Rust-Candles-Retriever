@@ -41,7 +41,6 @@ async function initChart(): Promise<void> {
 
             app.currentTimeframe = newTimeframe;
             updateTimeframeDisplay();
-            saveTimeframe();
             await loadCandles(savedRange);
         },
 
@@ -50,9 +49,6 @@ async function initChart(): Promise<void> {
             updateStatus(`Error: ${error.message}`, true);
         }
     });
-
-    // Initialize navigation buttons
-    initNavigationButtons();
 
     console.log('✅ Chart engine initialized');
 }
@@ -86,15 +82,11 @@ async function loadPairs(): Promise<void> {
                 app.availableTimeframes = pairsData[app.currentPair] || [];
                 app.chart.setTimeframes(app.availableTimeframes);
 
-                // Restaurer timeframe sauvegardé ou prendre défaut
-                const savedTF = loadTimeframe();
-                app.currentTimeframe = app.availableTimeframes.includes(savedTF)
-                    ? savedTF
-                    : (app.availableTimeframes.includes('1d')
-                        ? '1d'
-                        : app.availableTimeframes[app.availableTimeframes.length - 1]);
+                // Trouver le meilleur timeframe par défaut (1d si dispo, sinon le dernier)
+                app.currentTimeframe = app.availableTimeframes.includes('1d')
+                    ? '1d'
+                    : app.availableTimeframes[app.availableTimeframes.length - 1];
 
-                populateTimeframeDropdown();
                 updateTimeframeDisplay();
                 await loadCandles();
             }
@@ -111,15 +103,10 @@ async function loadPairs(): Promise<void> {
             app.availableTimeframes = pairsData[app.currentPair] || [];
             app.chart.setTimeframes(app.availableTimeframes);
 
-            // Restaurer timeframe sauvegardé ou prendre défaut
-            const savedTF = loadTimeframe();
-            app.currentTimeframe = app.availableTimeframes.includes(savedTF)
-                ? savedTF
-                : (app.availableTimeframes.includes('1d')
-                    ? '1d'
-                    : app.availableTimeframes[app.availableTimeframes.length - 1]);
+            app.currentTimeframe = app.availableTimeframes.includes('1d')
+                ? '1d'
+                : app.availableTimeframes[app.availableTimeframes.length - 1];
 
-            populateTimeframeDropdown();
             await loadCandles();
             console.log(`✅ Loaded ${pairs.length} pairs (selected: ${initialPair})`);
         }
@@ -203,142 +190,8 @@ function updateCandleCount(count: number): void {
 }
 
 function updateTimeframeDisplay(): void {
-    const dropdown = document.getElementById('timeframeSelector') as HTMLSelectElement | null;
-    if (dropdown) dropdown.value = app.currentTimeframe;
-}
-
-function populateTimeframeDropdown(): void {
-    const dropdown = document.getElementById('timeframeSelector') as HTMLSelectElement | null;
-    if (!dropdown) {
-        console.error('❌ timeframeSelector not found in DOM');
-        return;
-    }
-
-    console.log(`📋 Populating dropdown with timeframes: ${app.availableTimeframes.join(', ')}`);
-
-    dropdown.innerHTML = '';
-    app.availableTimeframes.forEach(tf => {
-        const option = document.createElement('option');
-        option.value = tf;
-        option.textContent = tf.toUpperCase();
-        dropdown.appendChild(option);
-    });
-
-    dropdown.value = app.currentTimeframe;
-    console.log(`✅ Dropdown populated, current TF: ${app.currentTimeframe}`);
-
-    // Event listener pour changement manuel
-    dropdown.onchange = async (e: Event) => {
-        if (app.isLoading) {
-            console.log('⏸️  Ignoring TF change, loading in progress');
-            return;
-        }
-
-        const newTF = (e.target as HTMLSelectElement).value;
-        console.log(`🔄 Manual TF change: ${app.currentTimeframe} → ${newTF}`);
-
-        if (newTF !== app.currentTimeframe) {
-            // Sauvegarder la plage actuelle avant changement
-            const savedRange = app.chart && app.chart.state.data.length > 0 ? {
-                start: app.chart.state.viewStart,
-                end: app.chart.state.viewEnd
-            } : null;
-
-            app.currentTimeframe = newTF;
-            if (app.chart) {
-                app.chart.state.currentTimeframe = newTF;
-            }
-            saveTimeframe();
-            await loadCandles(savedRange);
-        }
-    };
-}
-
-function saveTimeframe(): void {
-    try {
-        localStorage.setItem('selectedTimeframe', app.currentTimeframe);
-    } catch (e) {
-        console.warn('Failed to save timeframe to localStorage:', e);
-    }
-}
-
-function loadTimeframe(): string {
-    try {
-        return localStorage.getItem('selectedTimeframe') || '1d';
-    } catch (e) {
-        console.warn('Failed to load timeframe from localStorage:', e);
-        return '1d';
-    }
-}
-
-function initNavigationButtons(): void {
-    const navLeft = document.getElementById('navLeft') as HTMLButtonElement | null;
-    const navRight = document.getElementById('navRight') as HTMLButtonElement | null;
-
-    if (!navLeft || !navRight) {
-        console.error('❌ Navigation buttons not found in DOM');
-        return;
-    }
-
-    console.log('✅ Navigation buttons initialized');
-
-    navLeft.addEventListener('click', () => {
-        console.log('◀ Left navigation clicked');
-
-        if (app.isLoading) {
-            console.log('⏸️  Skipping nav: loading');
-            return;
-        }
-
-        if (!app.chart) {
-            console.log('⏸️  Skipping nav: no chart');
-            return;
-        }
-
-        if (app.chart.state.data.length === 0) {
-            console.log('⏸️  Skipping nav: no data');
-            return;
-        }
-
-        const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
-        const panAmount = viewWidth * 0.3; // Pan 30% de la vue
-
-        console.log(`← Panning left by ${panAmount}s`);
-
-        app.chart.state.viewStart -= panAmount;
-        app.chart.state.viewEnd -= panAmount;
-
-        app.chart.render();
-    });
-
-    navRight.addEventListener('click', () => {
-        console.log('▶ Right navigation clicked');
-
-        if (app.isLoading) {
-            console.log('⏸️  Skipping nav: loading');
-            return;
-        }
-
-        if (!app.chart) {
-            console.log('⏸️  Skipping nav: no chart');
-            return;
-        }
-
-        if (app.chart.state.data.length === 0) {
-            console.log('⏸️  Skipping nav: no data');
-            return;
-        }
-
-        const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
-        const panAmount = viewWidth * 0.3; // Pan 30% de la vue
-
-        console.log(`→ Panning right by ${panAmount}s`);
-
-        app.chart.state.viewStart += panAmount;
-        app.chart.state.viewEnd += panAmount;
-
-        app.chart.render();
-    });
+    const el = document.getElementById('currentTimeframe');
+    if (el) el.textContent = app.currentTimeframe;
 }
 
 // Settings Panel Management
