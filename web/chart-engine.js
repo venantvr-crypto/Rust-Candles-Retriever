@@ -55,11 +55,7 @@ class ChartEngine {
 
             // Zoom throttling
             isProcessingZoom: false,
-            lastZoomTime: 0,
-
-            // Render throttling (RAF-based)
-            renderScheduled: false,
-            overlayRenderScheduled: false
+            lastZoomTime: 0
         };
 
         // Callbacks
@@ -256,8 +252,8 @@ class ChartEngine {
                     console.log(`   ⚠️ Clamped to minWidth, new view: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
                 }
 
-                // Schedule render (throttled via RAF)
-                this.scheduleRender();
+                // Render direct
+                this.render();
             }
             // Si changement de TF, le callback va déclencher loadData qui va render
         } finally {
@@ -276,7 +272,7 @@ class ChartEngine {
         } else {
             this.state.showCrosshair = true;
             this.updateCrosshair();
-            this.scheduleOverlayRender();
+            this.renderOverlay();
         }
     }
 
@@ -284,7 +280,7 @@ class ChartEngine {
         this.state.showCrosshair = false;
         this.state.mouseX = -1;
         this.state.mouseY = -1;
-        this.scheduleOverlayRender();
+        this.renderOverlay();
     }
 
     handleMouseDown(e) {
@@ -311,7 +307,7 @@ class ChartEngine {
         this.state.viewStart = this.state.dragStartViewStart + timeShift;
         this.state.viewEnd = this.state.dragStartViewEnd + timeShift;
 
-        this.scheduleRender();
+        this.render();
     }
 
     handleResize() {
@@ -487,26 +483,6 @@ class ChartEngine {
 
         console.log(`📊 Timeframe change: ${oldBarsCount} bars → ${newBarsCount} bars`);
         console.log(`   Fixed window: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
-    }
-
-    scheduleRender() {
-        if (!this.state.renderScheduled) {
-            this.state.renderScheduled = true;
-            requestAnimationFrame(() => {
-                this.state.renderScheduled = false;
-                this.render();
-            });
-        }
-    }
-
-    scheduleOverlayRender() {
-        if (!this.state.overlayRenderScheduled) {
-            this.state.overlayRenderScheduled = true;
-            requestAnimationFrame(() => {
-                this.state.overlayRenderScheduled = false;
-                this.renderOverlay();
-            });
-        }
     }
 
     renderBackground() {
