@@ -30,6 +30,7 @@ struct BinanceKlineEvent {
     #[serde(rename = "e")]
     event_type: String,
     #[serde(rename = "s")]
+    #[allow(dead_code)]
     symbol: String,
     #[serde(rename = "k")]
     kline: BinanceKline,
@@ -73,6 +74,7 @@ pub struct RealtimeManager {
     /// Canal de broadcast pour les mises à jour de bougies
     broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
     /// Répertoire des bases de données (pour sauvegarder bougies complètes)
+    #[allow(dead_code)]
     db_dir: String,
 }
 
@@ -80,6 +82,7 @@ pub struct RealtimeManager {
 enum Command {
     Subscribe { symbol: String, timeframe: String },
     Unsubscribe { symbol: String, timeframe: String },
+    #[allow(dead_code)]
     Shutdown,
 }
 
