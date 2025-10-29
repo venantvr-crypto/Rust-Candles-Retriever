@@ -37,6 +37,7 @@ function initChart() {
 
             app.currentTimeframe = newTimeframe;
             updateTimeframeDisplay();
+            saveTimeframe();
             await loadCandles(savedRange);
         },
 
@@ -45,6 +46,9 @@ function initChart() {
             updateStatus(`Error: ${error.message}`, true);
         }
     });
+
+    // Initialize navigation buttons
+    initNavigationButtons();
 
     console.log('✅ Chart engine initialized');
 }
@@ -75,11 +79,15 @@ async function loadPairs() {
                 app.availableTimeframes = pairsData[app.currentPair] || [];
                 app.chart.setTimeframes(app.availableTimeframes);
 
-                // Trouver le meilleur timeframe par défaut (1d si dispo, sinon le dernier)
-                app.currentTimeframe = app.availableTimeframes.includes('1d')
-                    ? '1d'
-                    : app.availableTimeframes[app.availableTimeframes.length - 1];
+                // Restaurer timeframe sauvegardé ou prendre défaut
+                const savedTF = loadTimeframe();
+                app.currentTimeframe = app.availableTimeframes.includes(savedTF)
+                    ? savedTF
+                    : (app.availableTimeframes.includes('1d')
+                        ? '1d'
+                        : app.availableTimeframes[app.availableTimeframes.length - 1]);
 
+                populateTimeframeDropdown();
                 updateTimeframeDisplay();
                 await loadCandles();
             }
@@ -92,10 +100,15 @@ async function loadPairs() {
             app.availableTimeframes = pairsData[app.currentPair] || [];
             app.chart.setTimeframes(app.availableTimeframes);
 
-            app.currentTimeframe = app.availableTimeframes.includes('1d')
-                ? '1d'
-                : app.availableTimeframes[app.availableTimeframes.length - 1];
+            // Restaurer timeframe sauvegardé ou prendre défaut
+            const savedTF = loadTimeframe();
+            app.currentTimeframe = app.availableTimeframes.includes(savedTF)
+                ? savedTF
+                : (app.availableTimeframes.includes('1d')
+                    ? '1d'
+                    : app.availableTimeframes[app.availableTimeframes.length - 1]);
 
+            populateTimeframeDropdown();
             await loadCandles();
         }
 
@@ -182,8 +195,150 @@ function updateCandleCount(count) {
 }
 
 function updateTimeframeDisplay() {
-    const el = document.getElementById('currentTimeframe');
-    if (el) el.textContent = app.currentTimeframe;
+    const dropdown = document.getElementById('timeframeSelector');
+    if (dropdown) dropdown.value = app.currentTimeframe;
+}
+
+function populateTimeframeDropdown() {
+    const dropdown = document.getElementById('timeframeSelector');
+    if (!dropdown) {
+        console.error('❌ timeframeSelector not found in DOM');
+        return;
+    }
+
+    console.log(`📋 Populating dropdown with timeframes: ${app.availableTimeframes.join(', ')}`);
+
+    dropdown.innerHTML = '';
+    app.availableTimeframes.forEach(tf => {
+        const option = document.createElement('option');
+        option.value = tf;
+        option.textContent = tf.toUpperCase();
+        dropdown.appendChild(option);
+    });
+
+    dropdown.value = app.currentTimeframe;
+    console.log(`✅ Dropdown populated, current TF: ${app.currentTimeframe}`);
+
+    // Event listener pour changement manuel (retirer ancien listener si existe)
+    dropdown.onchange = async (e) => {
+        if (app.isLoading) {
+            console.log('⏸️  Ignoring TF change, loading in progress');
+            return;
+        }
+
+        const newTF = e.target.value;
+        console.log(`🔄 Manual TF change: ${app.currentTimeframe} → ${newTF}`);
+
+        if (newTF !== app.currentTimeframe) {
+            // Sauvegarder la plage actuelle avant changement
+            const savedRange = app.chart && app.chart.state.data.length > 0 ? {
+                start: app.chart.state.viewStart,
+                end: app.chart.state.viewEnd
+            } : null;
+
+            app.currentTimeframe = newTF;
+            app.chart.state.currentTimeframe = newTF;
+            saveTimeframe();
+            await loadCandles(savedRange);
+        }
+    };
+}
+
+function saveTimeframe() {
+    try {
+        localStorage.setItem('selectedTimeframe', app.currentTimeframe);
+    } catch (e) {
+        console.warn('Failed to save timeframe to localStorage:', e);
+    }
+}
+
+function loadTimeframe() {
+    try {
+        return localStorage.getItem('selectedTimeframe') || '1d';
+    } catch (e) {
+        console.warn('Failed to load timeframe from localStorage:', e);
+        return '1d';
+    }
+}
+
+function initNavigationButtons() {
+    const navLeft = document.getElementById('navLeft');
+    const navRight = document.getElementById('navRight');
+
+    if (!navLeft || !navRight) {
+        console.error('❌ Navigation buttons not found in DOM');
+        return;
+    }
+
+    console.log('✅ Navigation buttons initialized');
+
+    navLeft.addEventListener('click', () => {
+        console.log('◀ Left navigation clicked');
+
+        if (app.isLoading) {
+            console.log('⏸️  Skipping nav: loading');
+            return;
+        }
+
+        if (!app.chart) {
+            console.log('⏸️  Skipping nav: no chart');
+            return;
+        }
+
+        if (app.chart.state.data.length === 0) {
+            console.log('⏸️  Skipping nav: no data');
+            return;
+        }
+
+        const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
+        const panAmount = viewWidth * 0.3; // Pan 30% de la vue
+
+        console.log(`← Panning left by ${panAmount}s`);
+
+        app.chart.state.viewStart -= panAmount;
+        app.chart.state.viewEnd -= panAmount;
+
+        // Utiliser la méthode render directement
+        if (app.chart.scheduleRender) {
+            app.chart.scheduleRender();
+        } else {
+            app.chart.render();
+        }
+    });
+
+    navRight.addEventListener('click', () => {
+        console.log('▶ Right navigation clicked');
+
+        if (app.isLoading) {
+            console.log('⏸️  Skipping nav: loading');
+            return;
+        }
+
+        if (!app.chart) {
+            console.log('⏸️  Skipping nav: no chart');
+            return;
+        }
+
+        if (app.chart.state.data.length === 0) {
+            console.log('⏸️  Skipping nav: no data');
+            return;
+        }
+
+        const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
+        const panAmount = viewWidth * 0.3; // Pan 30% de la vue
+
+        console.log(`→ Panning right by ${panAmount}s`);
+
+        app.chart.state.viewStart += panAmount;
+        app.chart.state.viewEnd += panAmount;
+
+        // Utiliser la méthode render directement
+        if (app.chart.scheduleRender) {
+            app.chart.scheduleRender();
+        } else {
+            app.chart.render();
+        }
+    });
 }
 
 // Settings Panel Management

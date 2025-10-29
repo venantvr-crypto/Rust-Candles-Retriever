@@ -897,8 +897,9 @@ async fn main() -> std::io::Result<()> {
     start_auto_backfill(db_dir.clone());
 
     // Initialiser le gestionnaire de bougies temps réel
-    let realtime = Arc::new(RealtimeManager::new());
-    println!("🔌 Gestionnaire WebSocket temps réel initialisé");
+    // Les bougies complètes seront automatiquement sauvegardées en base
+    let realtime = Arc::new(RealtimeManager::new(db_dir.clone()));
+    println!("🔌 Gestionnaire WebSocket temps réel initialisé (auto-save activé)");
 
     // Initialiser le cache pour les requêtes de candles
     // Optimisé pour les requêtes fréquentes de données historiques

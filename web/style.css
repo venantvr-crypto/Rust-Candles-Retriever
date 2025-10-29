@@ -74,26 +74,62 @@ select:hover {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
-.timeframe-indicator {
+.timeframe-controls {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     align-items: center;
-    font-size: 14px;
-    font-weight: 500;
-    background: rgba(255, 255, 255, 0.15);
-    padding: 10px 18px;
-    border-radius: 12px;
 }
 
-.timeframe-badge {
+.timeframe-dropdown {
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
     background: rgba(255, 255, 255, 0.95);
     color: #667eea;
-    padding: 6px 14px;
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    min-width: 100px;
+}
+
+.timeframe-dropdown:hover {
+    background: #ffffff;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.nav-btn {
+    width: 36px;
+    height: 36px;
+    border: none;
     border-radius: 8px;
-    font-weight: 700;
-    font-size: 15px;
-    min-width: 40px;
-    text-align: center;
+    background: rgba(255, 255, 255, 0.9);
+    color: #667eea;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-btn:hover:not(:disabled) {
+    background: #ffffff;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+}
+
+.nav-btn:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.nav-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 .chart-container {
