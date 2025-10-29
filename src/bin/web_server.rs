@@ -16,6 +16,7 @@ use binance::api::*;
 use binance::market::*;
 use moka::future::Cache;
 use rusqlite::{Connection, params};
+use rust_candles_retriever::backfill::{BackfillOptions, run_backfill};
 use rust_candles_retriever::realtime::RealtimeManager;
 use rust_candles_retriever::retriever::CandleRetriever;
 use serde::{Deserialize, Serialize};
@@ -892,6 +893,9 @@ async fn main() -> std::io::Result<()> {
     println!("📊 Répertoire bases de données: {}", db_dir);
     println!("📁 Fichiers statiques: ./web");
 
+    // Lancer le backfill automatique pour toutes les paires existantes
+    start_auto_backfill(db_dir.clone());
+
     // Initialiser le gestionnaire de bougies temps réel
     let realtime = Arc::new(RealtimeManager::new());
     println!("🔌 Gestionnaire WebSocket temps réel initialisé");
@@ -925,4 +929,56 @@ async fn main() -> std::io::Result<()> {
     .bind(("127.0.0.1", port))?
     .run()
     .await
+}
+
+/// Lance le backfill automatique pour toutes les paires disponibles
+fn start_auto_backfill(db_dir: String) {
+    tokio::spawn(async move {
+        println!("🔄 Démarrage du backfill automatique...");
+
+        // Scanner le répertoire pour trouver toutes les paires
+        let db_path = std::path::Path::new(&db_dir);
+        let entries = match std::fs::read_dir(db_path) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("❌ Impossible de lire le répertoire DB: {}", e);
+                return;
+            }
+        };
+
+        let mut pairs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.ends_with(".db") {
+                        let symbol = file_name.trim_end_matches(".db").to_string();
+                        pairs.push(symbol);
+                    }
+                }
+            }
+        }
+
+        println!("📋 Paires trouvées pour backfill: {:?}", pairs);
+
+        // Lancer le backfill pour chaque paire en parallèle
+        let mut tasks = Vec::new();
+        for symbol in pairs {
+            let db_dir_clone = db_dir.clone();
+            let task = tokio::spawn(async move {
+                let options = BackfillOptions::new(symbol.clone(), db_dir_clone);
+                if let Err(e) = run_backfill(options).await {
+                    eprintln!("❌ Erreur backfill pour {}: {}", symbol, e);
+                }
+            });
+            tasks.push(task);
+        }
+
+        // Attendre que tous les backfills se terminent
+        for task in tasks {
+            let _ = task.await;
+        }
+
+        println!("✅ Backfill automatique terminé pour toutes les paires");
+    });
 }
