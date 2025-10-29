@@ -1,4 +1,4 @@
-.PHONY: help build check test clean run-ada run-bnb run-btc run-sol verify-data web fmt clippy doc db-status db-counts db-shell migrate
+.PHONY: help build check test clean run-ada run-bnb run-btc run-sol verify-ada verify-bnb verify-btc verify-eth verify-sol verify-all web fmt clippy doc db-status db-counts db-shell migrate
 
 # Variables
 CARGO = cargo
@@ -72,6 +72,36 @@ run-eth-from: ## Lance SOLUSDT avec START_DATE
 run-sol-from: ## Lance SOLUSDT avec START_DATE
 	@echo "$(GREEN)Lancement de la récupération pour SOLUSDT depuis $(START_DATE)...$(NC)"
 	$(CARGO) run --bin $(BINARY) -- --symbol SOLUSDT --start-date $(START_DATE) --db-dir $(DB_DIR)
+
+# Vérification des données
+
+verify-ada: ## Vérifie les données ADAUSDT
+	@echo "$(GREEN)Vérification des données pour ADAUSDT...$(NC)"
+	$(CARGO) run --bin verify_data -- --symbol ADAUSDT --db-file $(DB_DIR)/ADAUSDT.db
+
+verify-bnb: ## Vérifie les données BNBUSDT
+	@echo "$(GREEN)Vérification des données pour BNBUSDT...$(NC)"
+	$(CARGO) run --bin verify_data -- --symbol BNBUSDT --db-file $(DB_DIR)/BNBUSDT.db
+
+verify-btc: ## Vérifie les données BTCUSDT
+	@echo "$(GREEN)Vérification des données pour BTCUSDT...$(NC)"
+	$(CARGO) run --bin verify_data -- --symbol BTCUSDT --db-file $(DB_DIR)/BTCUSDT.db
+
+verify-eth: ## Vérifie les données ETHUSDT
+	@echo "$(GREEN)Vérification des données pour ETHUSDT...$(NC)"
+	$(CARGO) run --bin verify_data -- --symbol ETHUSDT --db-file $(DB_DIR)/ETHUSDT.db
+
+verify-sol: ## Vérifie les données SOLUSDT
+	@echo "$(GREEN)Vérification des données pour SOLUSDT...$(NC)"
+	$(CARGO) run --bin verify_data -- --symbol SOLUSDT --db-file $(DB_DIR)/SOLUSDT.db
+
+verify-all: ## Vérifie toutes les paires
+	@echo "$(GREEN)Vérification de toutes les paires...$(NC)"
+	@$(MAKE) verify-ada
+	@$(MAKE) verify-bnb
+	@$(MAKE) verify-btc
+	@$(MAKE) verify-eth
+	@$(MAKE) verify-sol
 
 # Développement
 
