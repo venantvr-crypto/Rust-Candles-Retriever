@@ -26,9 +26,25 @@ export class ChartEngine {
     legendContainer: HTMLDivElement;
     overlayParams: any;
     realtimeCandles: Map<string, any>; // TF → candle en cours
-    realtimePolling: number | null; // Timer ID pour polling
+    realtimeWs: WebSocket | null; // Connexion WebSocket temps réel
     realtimeSubscribed: Set<string>; // Streams déjà souscrits (symbol:tf)
     realtimeUpdating: boolean; // Flag pour éviter appels concurrents
+
+    // Graphics réutilisables pour performance (batching)
+    wicksGraphics: PIXI.Graphics;
+    bodiesUpFilledGraphics: PIXI.Graphics;
+    bodiesUpHollowGraphics: PIXI.Graphics;
+    bodiesDownGraphics: PIXI.Graphics;
+    bordersGraphics: PIXI.Graphics;
+    realtimeMarkersGraphics: PIXI.Graphics;
+    volumeGraphics: PIXI.Graphics;
+    rsiGraphics: PIXI.Graphics;
+    indicatorBgGraphics: PIXI.Graphics;
+
+    // Optimisation rendu avec requestAnimationFrame
+    renderScheduled: boolean;
+    overlayRenderScheduled: boolean;
+    rafId: number | null;
 
     private constructor(container: HTMLElement, app: PIXI.Application, options: ChartOptions = {}) {
         this.container = container;
@@ -49,6 +65,28 @@ export class ChartEngine {
         this.app.stage.addChild(this.bgLayer);
         this.app.stage.addChild(this.mainLayer);
         this.app.stage.addChild(this.overlayLayer);
+
+        // Créer objets Graphics réutilisables (batching pour performance)
+        // Ordre d'ajout = ordre de rendu (z-index)
+        this.volumeGraphics = new PIXI.Graphics();
+        this.indicatorBgGraphics = new PIXI.Graphics();
+        this.wicksGraphics = new PIXI.Graphics();
+        this.bodiesDownGraphics = new PIXI.Graphics();
+        this.bodiesUpFilledGraphics = new PIXI.Graphics();
+        this.bodiesUpHollowGraphics = new PIXI.Graphics();
+        this.bordersGraphics = new PIXI.Graphics();
+        this.realtimeMarkersGraphics = new PIXI.Graphics();
+        this.rsiGraphics = new PIXI.Graphics();
+
+        this.mainLayer.addChild(this.volumeGraphics);
+        this.mainLayer.addChild(this.indicatorBgGraphics);
+        this.mainLayer.addChild(this.wicksGraphics);
+        this.mainLayer.addChild(this.bodiesDownGraphics);
+        this.mainLayer.addChild(this.bodiesUpFilledGraphics);
+        this.mainLayer.addChild(this.bodiesUpHollowGraphics);
+        this.mainLayer.addChild(this.bordersGraphics);
+        this.mainLayer.addChild(this.realtimeMarkersGraphics);
+        this.mainLayer.addChild(this.rsiGraphics);
 
         // Canvas 2D overlay pour UI elements (axes, labels, crosshair)
         this.overlayCanvas = document.createElement('canvas');
@@ -106,9 +144,14 @@ export class ChartEngine {
 
         // Polling temps réel
         this.realtimeCandles = new Map();
-        this.realtimePolling = null;
+        this.realtimeWs = null;
         this.realtimeSubscribed = new Set();
         this.realtimeUpdating = false;
+
+        // Optimisation rendu
+        this.renderScheduled = false;
+        this.overlayRenderScheduled = false;
+        this.rafId = null;
 
         // Conteneur pour légendes interactives
         this.legendContainer = document.createElement('div');
@@ -392,8 +435,8 @@ export class ChartEngine {
                 // Vérifier si on doit recharger plus de données
                 this.checkAndReloadData();
 
-                // Render direct
-                this.render();
+                // Planifier render via RAF
+                this.scheduleRender();
             }
             // Si changement de TF, le callback va déclencher loadData qui va render
         } finally {
@@ -412,7 +455,8 @@ export class ChartEngine {
         } else {
             this.state.showCrosshair = true;
             this.updateCrosshair();
-            this.renderOverlayOnly();
+            // Utiliser scheduleOverlayRender au lieu d'appel direct
+            this.scheduleOverlayRender();
         }
     }
 
@@ -453,7 +497,8 @@ export class ChartEngine {
         this.state.viewStart = this.state.dragStartViewStart + timeShift;
         this.state.viewEnd = this.state.dragStartViewEnd + timeShift;
 
-        this.render();
+        // Planifier render via RAF pour éviter trop de rendus pendant le drag
+        this.scheduleRender();
     }
 
     handleResize() {
@@ -729,86 +774,75 @@ export class ChartEngine {
                 }
             }
 
-            // Souscrire uniquement aux nouveaux streams
-            if (newStreams.length > 0) {
+            // Si pas de WebSocket, en créer un
+            if (!this.realtimeWs || this.realtimeWs.readyState !== WebSocket.OPEN) {
+                this.connectWebSocket();
+            }
+
+            // Envoyer la souscription via WebSocket
+            if (newStreams.length > 0 && this.realtimeWs && this.realtimeWs.readyState === WebSocket.OPEN) {
                 console.log(`🔌 Subscribing to new streams for ${this.state.symbol}: ${newStreams.join(', ')}`);
 
-                try {
-                    const subscribeUrl = `/api/realtime/subscribe?symbol=${this.state.symbol}&timeframes=${newStreams.join(',')}`;
-                    const subscribeResponse = await fetch(subscribeUrl, {method: 'POST'});
+                const subscribeMsg = {
+                    action: 'subscribe',
+                    symbol: this.state.symbol,
+                    timeframes: tfArray
+                };
 
-                    if (subscribeResponse.ok) {
-                        console.log(`✅ Subscribed to ${newStreams.length} new stream(s)`);
-                    } else {
-                        console.error('Failed to subscribe:', subscribeResponse.statusText);
-                    }
-                } catch (error) {
-                    console.error('Subscribe error:', error);
-                }
-            } else {
-                console.log(`♻️  Already subscribed to all required streams`);
+                this.realtimeWs.send(JSON.stringify(subscribeMsg));
             }
-
-            // Arrêter le polling existant
-            if (this.realtimePolling) {
-                clearInterval(this.realtimePolling);
-                this.realtimePolling = null;
-            }
-
-            // Fonction de polling (lecture seule)
-            const poll = async () => {
-                try {
-                    const url = `/api/realtime/candles?symbol=${this.state.symbol}&timeframes=${tfArray.join(',')}`;
-                    const response = await fetch(url);
-
-                    if (!response.ok) {
-                        console.error('Failed to fetch realtime candles:', response.statusText);
-                        return;
-                    }
-
-                    const data = await response.json();
-
-                    // Traiter les bougies reçues (sans render pour éviter 3 renders)
-                    let needsRender = false;
-                    for (const [tf, candle] of Object.entries(data)) {
-                        if (candle) {
-                            const updated = this.handleRealtimeCandle(tf, candle as any, (candle as any).is_closed, false);
-                            if (updated) needsRender = true;
-                        }
-                    }
-
-                    // Render une seule fois après avoir traité toutes les bougies
-                    if (needsRender) {
-                        this.render();
-                    }
-                } catch (error) {
-                    console.error('Realtime polling error:', error);
-                }
-            };
-
-            // Polling initial après 500ms (laisser temps à la souscription si nouveaux streams)
-            if (newStreams.length > 0) {
-                setTimeout(poll, 500);
-            } else {
-                poll(); // Immédiat si déjà souscrit
-            }
-
-            // Polling toutes les 2 secondes
-            this.realtimePolling = window.setInterval(poll, 2000);
 
         } finally {
             this.realtimeUpdating = false;
         }
     }
 
+    connectWebSocket() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/realtime`;
+
+        console.log('🔌 Connecting to WebSocket:', wsUrl);
+
+        this.realtimeWs = new WebSocket(wsUrl);
+
+        this.realtimeWs.onopen = () => {
+            console.log('✅ WebSocket connected');
+        };
+
+        this.realtimeWs.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === 'candle_update') {
+                    this.handleRealtimeCandle(msg.timeframe, msg.candle, msg.candle.is_closed, true);
+                } else if (msg.type === 'subscribed') {
+                    console.log(`✅ Subscribed to ${msg.symbol} [${msg.timeframes.join(', ')}]`);
+                } else if (msg.type === 'error') {
+                    console.error('❌ WebSocket error:', msg.message);
+                }
+            } catch (error) {
+                console.error('Failed to parse WebSocket message:', error);
+            }
+        };
+
+        this.realtimeWs.onerror = (error) => {
+            console.error('❌ WebSocket error:', error);
+        };
+
+        this.realtimeWs.onclose = () => {
+            console.log('🔌 WebSocket closed, will reconnect on next update');
+            this.realtimeWs = null;
+        };
+    }
+
     stopRealtimeUpdates() {
-        if (this.realtimePolling) {
-            clearInterval(this.realtimePolling);
-            this.realtimePolling = null;
+        if (this.realtimeWs) {
+            this.realtimeWs.close();
+            this.realtimeWs = null;
         }
         this.realtimeCandles.clear();
         // NE PAS vider realtimeSubscribed - on garde les souscriptions actives
-        console.log('🛑 Stopped realtime polling');
+        console.log('🛑 Stopped realtime WebSocket');
     }
 
     handleRealtimeCandle(timeframe: string, candle: any, isComplete: boolean, shouldRender: boolean = true): boolean {
@@ -857,9 +891,9 @@ export class ChartEngine {
                     // Recalculer le RSI de manière incrémentale
                     this.updateRealtimeRSI();
 
-                    // Re-render seulement si demandé
+                    // Planifier render seulement si demandé
                     if (shouldRender) {
-                        this.render();
+                        this.scheduleRender();
                     }
                 }
             }
@@ -1038,7 +1072,7 @@ export class ChartEngine {
 
             checkbox.addEventListener('change', () => {
                 this.rsiVisibility.set(tf, checkbox.checked);
-                this.render();
+                this.scheduleRender();
             });
 
             label.appendChild(checkbox);
@@ -1195,14 +1229,48 @@ export class ChartEngine {
         this.bgLayer.addChild(watermark);
     }
 
+    /**
+     * Planifie un rendu complet via requestAnimationFrame
+     * Évite plusieurs rendus par frame
+     */
+    scheduleRender() {
+        if (this.renderScheduled) return;
+        this.renderScheduled = true;
+        requestAnimationFrame(() => {
+            this.renderScheduled = false;
+            this.render();
+        });
+    }
+
+    /**
+     * Planifie un rendu d'overlay uniquement via requestAnimationFrame
+     * Plus léger que render() complet
+     */
+    scheduleOverlayRender() {
+        if (this.overlayRenderScheduled) return;
+        this.overlayRenderScheduled = true;
+        requestAnimationFrame(() => {
+            this.overlayRenderScheduled = false;
+            this.renderOverlayOnly();
+        });
+    }
+
     render() {
         if (this.state.data.length === 0) return;
 
         const w = this.app.screen.width;
         const h = this.app.screen.height;
 
-        // Nettoyer le layer principal (WebGL)
-        this.mainLayer.removeChildren();
+        // Nettoyer les Graphics réutilisables (au lieu de removeChildren)
+        this.wicksGraphics.clear();
+        this.bodiesUpFilledGraphics.clear();
+        this.bodiesUpHollowGraphics.clear();
+        this.bodiesDownGraphics.clear();
+        this.bordersGraphics.clear();
+        this.realtimeMarkersGraphics.clear();
+        this.volumeGraphics.clear();
+        this.rsiGraphics.clear();
+        this.indicatorBgGraphics.clear();
 
         // Nettoyer l'overlay Canvas2D
         this.overlayCtx.clearRect(0, 0, w, h);
@@ -1273,6 +1341,13 @@ export class ChartEngine {
         const realtimeCandle = this.realtimeCandles.get(this.state.currentTimeframe);
         const realtimeCandleTime = realtimeCandle?.time || null;
 
+        // Convertir couleurs une seule fois
+        const upColor = parseInt(this.theme.upColor.replace('#', ''), 16);
+        const downColor = parseInt(this.theme.downColor.replace('#', ''), 16);
+        const upBorderColor = parseInt(this.theme.upBorderColor.replace('#', ''), 16);
+        const downBorderColor = parseInt(this.theme.downBorderColor.replace('#', ''), 16);
+
+        // Dessiner toutes les bougies en batch (beaucoup plus performant)
         visibleCandles.forEach(candle => {
             const x = timeToX(candle.time);
             const yOpen = priceToY(candle.open);
@@ -1281,26 +1356,22 @@ export class ChartEngine {
             const yLow = priceToY(candle.low);
 
             const isUp = candle.close >= candle.open;
-            const color = parseInt(isUp ? this.theme.upColor.replace('#', '') : this.theme.downColor.replace('#', ''), 16);
-            const borderColor = parseInt(isUp ? this.theme.upBorderColor.replace('#', '') : this.theme.downBorderColor.replace('#', ''), 16);
-
-            const candleGraphics = new PIXI.Graphics();
+            const color = isUp ? upColor : downColor;
+            const borderColor = isUp ? upBorderColor : downBorderColor;
 
             // Marqueur WebSocket (trait gris sous la bougie)
             const isRealtimeCandle = realtimeCandleTime !== null && candle.time === realtimeCandleTime;
             if (isRealtimeCandle) {
                 const markerY = yLow + 8;
-                candleGraphics.lineStyle(2, 0x808080, 0.6);
-                candleGraphics.moveTo(x - candleWidth / 2, markerY);
-                candleGraphics.lineTo(x + candleWidth / 2, markerY);
-                candleGraphics.stroke();
+                this.realtimeMarkersGraphics.lineStyle(2, 0x808080, 0.6);
+                this.realtimeMarkersGraphics.moveTo(x - candleWidth / 2, markerY);
+                this.realtimeMarkersGraphics.lineTo(x + candleWidth / 2, markerY);
             }
 
-            // Mèche
-            candleGraphics.lineStyle(wickWidth, color, 1);
-            candleGraphics.moveTo(x, yHigh);
-            candleGraphics.lineTo(x, yLow);
-            candleGraphics.stroke();
+            // Mèche (toutes dans le même Graphics)
+            this.wicksGraphics.lineStyle(wickWidth, color, 1);
+            this.wicksGraphics.moveTo(x, yHigh);
+            this.wicksGraphics.lineTo(x, yLow);
 
             // Corps
             const bodyTop = Math.min(yOpen, yClose);
@@ -1308,28 +1379,39 @@ export class ChartEngine {
 
             // Remplissage (creux si haussier et hollowUp activé)
             if (isUp && hollowUp) {
-                // Creux: juste bordure
+                // Creux: juste bordure (dans bodiesUpHollowGraphics)
                 if (borderWidth > 0) {
-                    candleGraphics.lineStyle(borderWidth, borderColor, 1);
-                    candleGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
-                    candleGraphics.stroke();
+                    this.bodiesUpHollowGraphics.lineStyle(borderWidth, borderColor, 1);
+                    this.bodiesUpHollowGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                }
+            } else if (isUp) {
+                // Haussier plein
+                this.bodiesUpFilledGraphics.beginFill(color);
+                this.bodiesUpFilledGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                this.bodiesUpFilledGraphics.endFill();
+
+                if (borderWidth > 0) {
+                    this.bordersGraphics.lineStyle(borderWidth, borderColor, 1);
+                    this.bordersGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
                 }
             } else {
-                // Plein
-                candleGraphics.beginFill(color);
-                candleGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
-                candleGraphics.endFill();
+                // Baissier (toujours plein)
+                this.bodiesDownGraphics.beginFill(color);
+                this.bodiesDownGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+                this.bodiesDownGraphics.endFill();
 
-                // Bordure optionnelle
                 if (borderWidth > 0) {
-                    candleGraphics.lineStyle(borderWidth, borderColor, 1);
-                    candleGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
-                    candleGraphics.stroke();
+                    this.bordersGraphics.lineStyle(borderWidth, borderColor, 1);
+                    this.bordersGraphics.drawRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
                 }
             }
-
-            this.mainLayer.addChild(candleGraphics);
         });
+
+        // Appliquer les strokes après avoir dessiné toutes les lignes (batching)
+        this.wicksGraphics.stroke();
+        this.realtimeMarkersGraphics.stroke();
+        this.bodiesUpHollowGraphics.stroke();
+        this.bordersGraphics.stroke();
 
         // Indicateurs
         if (chartConfig.get('indicators.enabled') && this.rsiData.size > 0) {
@@ -1344,6 +1426,9 @@ export class ChartEngine {
             }
         }
 
+        // Calculer indicatorY pour le panneau RSI séparé
+        const indicatorY = chartY + chartH + 5;
+
         // Sauvegarder les paramètres pour redessiner l'overlay
         this.overlayParams = {
             w, h,
@@ -1352,6 +1437,7 @@ export class ChartEngine {
             visibleCandles,
             volumeHeight,
             indicatorH,
+            indicatorY,
             timeToX
         };
 
@@ -1368,31 +1454,35 @@ export class ChartEngine {
         if (candles.length === 0) return;
 
         const maxVolume = Math.max(...candles.map(c => c.volume));
-        const volumeGraphics = new PIXI.Graphics();
 
+        // Convertir couleurs une seule fois
+        const volUpColorStr = chartConfig.get('colors.volumeUpColor');
+        const volDownColorStr = chartConfig.get('colors.volumeDownColor');
+
+        const matchUp = volUpColorStr.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+        const volUpColor = matchUp ? parseInt(matchUp[1], 16) : 0x26a69a;
+        const volUpAlpha = matchUp && matchUp[2] ? parseInt(matchUp[2], 16) / 255 : 0.5;
+
+        const matchDown = volDownColorStr.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+        const volDownColor = matchDown ? parseInt(matchDown[1], 16) : 0xef5350;
+        const volDownAlpha = matchDown && matchDown[2] ? parseInt(matchDown[2], 16) / 255 : 0.5;
+
+        const barWidth = Math.max(1, chartW / candles.length * 0.8);
+
+        // Dessiner toutes les barres de volume dans le même Graphics
         candles.forEach(candle => {
             const x = timeToX(candle.time);
             const height = (candle.volume / maxVolume) * volumeHeight * 0.95;
             const y = chartY + chartH - height;
 
             const isUp = candle.close >= candle.open;
-            const colorStr = isUp
-                ? chartConfig.get('colors.volumeUpColor')
-                : chartConfig.get('colors.volumeDownColor');
+            const color = isUp ? volUpColor : volDownColor;
+            const alpha = isUp ? volUpAlpha : volDownAlpha;
 
-            // Convertir rgba/hex en format PixiJS (hex + alpha)
-            const match = colorStr.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
-            const color = match ? parseInt(match[1], 16) : 0x26a69a;
-            const alpha = match && match[2] ? parseInt(match[2], 16) / 255 : 0.5;
-
-            const barWidth = Math.max(1, chartW / candles.length * 0.8);
-
-            volumeGraphics.beginFill(color, alpha);
-            volumeGraphics.drawRect(x - barWidth / 2, y, barWidth, height);
-            volumeGraphics.endFill();
+            this.volumeGraphics.beginFill(color, alpha);
+            this.volumeGraphics.drawRect(x - barWidth / 2, y, barWidth, height);
+            this.volumeGraphics.endFill();
         });
-
-        this.mainLayer.addChild(volumeGraphics);
     }
 
     renderIndicatorsOverlay(chartX, chartY, chartW, chartH, timeToX, priceMin, priceMax, priceRange) {
@@ -1408,14 +1498,13 @@ export class ChartEngine {
             return chartY + chartH * (1 - ratio);
         };
 
-        const rsiGraphics = new PIXI.Graphics();
-
+        // Utiliser le Graphics réutilisable (déjà cleared au début de render())
         this.rsiData.forEach((data, tf) => {
             if (!this.rsiVisibility.get(tf)) return;
             const colorStr = this.getRSIColorForTimeframe(tf);
             const color = parseInt(colorStr.replace('#', ''), 16);
 
-            rsiGraphics.lineStyle(1.5, color, 1);
+            this.rsiGraphics.lineStyle(1.5, color, 1);
 
             let first = true;
             data.forEach(point => {
@@ -1423,17 +1512,16 @@ export class ChartEngine {
                     const x = timeToX(point.time);
                     const y = rsiToY(point.value);
                     if (first) {
-                        rsiGraphics.moveTo(x, y);
+                        this.rsiGraphics.moveTo(x, y);
                         first = false;
                     } else {
-                        rsiGraphics.lineTo(x, y);
+                        this.rsiGraphics.lineTo(x, y);
                     }
                 }
             });
-            rsiGraphics.stroke();
+            this.rsiGraphics.stroke();
         });
 
-        this.mainLayer.addChild(rsiGraphics);
         // Note: Les échelles RSI sont dessinées dans renderStaticOverlay()
     }
 
@@ -1447,25 +1535,16 @@ export class ChartEngine {
         // Positionner le panneau RSI juste en dessous de la zone des prix
         const indicatorY = chartY + chartH + 5;
 
-        const indicatorGraphics = new PIXI.Graphics();
-
-        // Fond
+        // Fond (utiliser indicatorBgGraphics)
         const bgColor = this.theme.bg === '#ffffff' ? 0xf9f9f9 : 0x252525;
-        indicatorGraphics.beginFill(bgColor);
-        indicatorGraphics.drawRect(chartX, indicatorY, chartW, indicatorH);
-        indicatorGraphics.endFill();
+        this.indicatorBgGraphics.beginFill(bgColor);
+        this.indicatorBgGraphics.drawRect(chartX, indicatorY, chartW, indicatorH);
+        this.indicatorBgGraphics.endFill();
 
-        // Grille horizontale
-        const gridColor = parseInt(this.theme.grid.replace('#', ''), 16);
-        indicatorGraphics.lineStyle(1, gridColor, 0.3);
-        [30, 50, 70].forEach(level => {
-            const y = indicatorY + indicatorH * (1 - level / 100);
-            indicatorGraphics.moveTo(chartX, y);
-            indicatorGraphics.lineTo(chartX + chartW, y);
-        });
-        indicatorGraphics.stroke();
+        // Grille horizontale (lignes de référence RSI 30, 50, 70) - en pointillés
+        // Note: Les lignes sont dessinées dans renderStaticOverlay avec le canvas pour supporter les pointillés
 
-        // Courbes RSI
+        // Courbes RSI (utiliser rsiGraphics)
         const rsiToY = (value) => indicatorY + indicatorH * (1 - value / 100);
 
         this.rsiData.forEach((data, tf) => {
@@ -1473,7 +1552,7 @@ export class ChartEngine {
             const colorStr = this.getRSIColorForTimeframe(tf);
             const color = parseInt(colorStr.replace('#', ''), 16);
 
-            indicatorGraphics.lineStyle(1.5, color, 1);
+            this.rsiGraphics.lineStyle(1.5, color, 1);
 
             let first = true;
             data.forEach(point => {
@@ -1481,17 +1560,16 @@ export class ChartEngine {
                     const x = timeToX(point.time);
                     const y = rsiToY(point.value);
                     if (first) {
-                        indicatorGraphics.moveTo(x, y);
+                        this.rsiGraphics.moveTo(x, y);
                         first = false;
                     } else {
-                        indicatorGraphics.lineTo(x, y);
+                        this.rsiGraphics.lineTo(x, y);
                     }
                 }
             });
-            indicatorGraphics.stroke();
+            this.rsiGraphics.stroke();
         });
 
-        this.mainLayer.addChild(indicatorGraphics);
         // Note: Les échelles RSI sont dessinées dans renderStaticOverlay()
     }
 
@@ -1654,7 +1732,23 @@ export class ChartEngine {
     renderStaticOverlay() {
         if (!this.overlayParams) return;
 
-        const {w, h, priceMin, priceMax, priceRange, priceToY, chartX, chartY, chartW, chartH, visibleCandles, volumeHeight, indicatorH, timeToX} = this.overlayParams;
+        const {
+            w,
+            h,
+            priceMin,
+            priceMax,
+            priceRange,
+            priceToY,
+            chartX,
+            chartY,
+            chartW,
+            chartH,
+            visibleCandles,
+            volumeHeight,
+            indicatorH,
+            indicatorY,
+            timeToX
+        } = this.overlayParams;
 
         // Dessiner axe prix
         this.renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH);
@@ -1675,8 +1769,7 @@ export class ChartEngine {
                 const candleChartH = chartH - volumeHeight;
                 this.renderRSIScaleOverlay(chartX, chartY, chartW, candleChartH, priceMin, priceMax, priceRange);
             } else {
-                // Mode séparé: échelle à gauche
-                const indicatorY = chartY + chartH + 5;
+                // Mode séparé: échelle à gauche avec lignes de référence
                 this.renderRSIScaleSeparate(chartX, indicatorY, indicatorH);
             }
         }
@@ -1690,6 +1783,25 @@ export class ChartEngine {
         };
 
         this.overlayCtx.save();
+
+        // Dessiner les lignes de référence 30, 50, 70 en pointillés discrets (mode overlay)
+        this.overlayCtx.strokeStyle = '#666666'; // Gris moyen
+        this.overlayCtx.lineWidth = 1; // Fin
+        this.overlayCtx.globalAlpha = 0.25; // Plus transparent en overlay
+        this.overlayCtx.setLineDash([4, 4]); // Pointillés
+
+        [30, 50, 70].forEach(level => {
+            const y = rsiToY(level);
+            this.overlayCtx.beginPath();
+            this.overlayCtx.moveTo(chartX, y);
+            this.overlayCtx.lineTo(chartX + chartW, y);
+            this.overlayCtx.stroke();
+        });
+
+        this.overlayCtx.setLineDash([]); // Reset
+        this.overlayCtx.globalAlpha = 1.0;
+
+        // Dessiner les labels
         this.overlayCtx.fillStyle = this.theme.textLight;
         this.overlayCtx.font = '10px monospace';
         this.overlayCtx.textAlign = 'left';
@@ -1697,11 +1809,33 @@ export class ChartEngine {
             const y = rsiToY(level);
             this.overlayCtx.fillText(`RSI ${level}`, chartX + chartW + 5, y + 3);
         });
+
         this.overlayCtx.restore();
     }
 
     renderRSIScaleSeparate(chartX, indicatorY, indicatorH) {
+        const chartW = this.app.screen.width - this.layout.marginLeft - this.layout.marginRight;
+
         this.overlayCtx.save();
+
+        // Dessiner les lignes de référence 30, 50, 70 en pointillés discrets
+        this.overlayCtx.strokeStyle = '#666666'; // Gris moyen
+        this.overlayCtx.lineWidth = 1; // Fin
+        this.overlayCtx.globalAlpha = 0.3; // Transparent
+        this.overlayCtx.setLineDash([4, 4]); // Pointillés
+
+        [30, 50, 70].forEach(level => {
+            const y = indicatorY + indicatorH * (1 - level / 100);
+            this.overlayCtx.beginPath();
+            this.overlayCtx.moveTo(chartX, y);
+            this.overlayCtx.lineTo(chartX + chartW, y);
+            this.overlayCtx.stroke();
+        });
+
+        this.overlayCtx.setLineDash([]); // Reset
+        this.overlayCtx.globalAlpha = 1.0;
+
+        // Dessiner les labels
         this.overlayCtx.fillStyle = this.theme.text;
         this.overlayCtx.font = '10px monospace';
         this.overlayCtx.textAlign = 'right';
@@ -1710,6 +1844,7 @@ export class ChartEngine {
             const y = indicatorY + indicatorH * (1 - level / 100);
             this.overlayCtx.fillText(level.toString(), chartX - 5, y);
         });
+
         this.overlayCtx.restore();
     }
 

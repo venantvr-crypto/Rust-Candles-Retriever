@@ -56,12 +56,22 @@ struct BinanceKline {
 /// Clé unique pour identifier une bougie (symbol, timeframe)
 type StreamKey = (String, String);
 
+/// Événement de mise à jour de bougie pour broadcast
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandleUpdate {
+    pub symbol: String,
+    pub timeframe: String,
+    pub candle: RealtimeCandle,
+}
+
 /// Gestionnaire de connexions WebSocket temps réel
 pub struct RealtimeManager {
     /// Cache des dernières bougies partielles: (symbol, tf) -> candle
     cache: Arc<RwLock<HashMap<StreamKey, RealtimeCandle>>>,
     /// Canal pour envoyer des commandes au thread de gestion
     command_tx: mpsc::UnboundedSender<Command>,
+    /// Canal de broadcast pour les mises à jour de bougies
+    broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
 }
 
 /// Commandes pour le gestionnaire
@@ -76,15 +86,26 @@ impl RealtimeManager {
     pub fn new() -> Self {
         let cache = Arc::new(RwLock::new(HashMap::new()));
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
         let manager_cache = Arc::clone(&cache);
+        let manager_broadcast = broadcast_tx.clone();
 
         // Lancer le thread de gestion en arrière-plan
         tokio::spawn(async move {
-            Self::run_manager(manager_cache, command_rx).await;
+            Self::run_manager(manager_cache, command_rx, manager_broadcast).await;
         });
 
-        Self { cache, command_tx }
+        Self {
+            cache,
+            command_tx,
+            broadcast_tx,
+        }
+    }
+
+    /// S'abonne au canal de broadcast pour recevoir les mises à jour
+    pub fn subscribe_updates(&self) -> tokio::sync::broadcast::Receiver<CandleUpdate> {
+        self.broadcast_tx.subscribe()
     }
 
     /// Souscrit à un stream (symbol, timeframe)
@@ -122,6 +143,7 @@ impl RealtimeManager {
     async fn run_manager(
         cache: Arc<RwLock<HashMap<StreamKey, RealtimeCandle>>>,
         mut command_rx: mpsc::UnboundedReceiver<Command>,
+        broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
     ) {
         let mut active_streams: HashMap<StreamKey, tokio::task::JoinHandle<()>> = HashMap::new();
 
@@ -140,10 +162,17 @@ impl RealtimeManager {
                     let stream_cache = Arc::clone(&cache);
                     let stream_symbol = symbol.clone();
                     let stream_tf = timeframe.clone();
+                    let stream_broadcast = broadcast_tx.clone();
 
                     // Lancer une task pour ce stream
                     let handle = tokio::spawn(async move {
-                        Self::handle_stream(stream_cache, stream_symbol, stream_tf).await;
+                        Self::handle_stream(
+                            stream_cache,
+                            stream_symbol,
+                            stream_tf,
+                            stream_broadcast,
+                        )
+                        .await;
                     });
 
                     active_streams.insert(key, handle);
@@ -177,6 +206,7 @@ impl RealtimeManager {
         cache: Arc<RwLock<HashMap<StreamKey, RealtimeCandle>>>,
         symbol: String,
         timeframe: String,
+        broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
     ) {
         let binance_interval = Self::to_binance_interval(&timeframe);
         let stream_name = format!("{}@kline_{}", symbol.to_lowercase(), binance_interval);
@@ -210,7 +240,15 @@ impl RealtimeManager {
 
                                         // Mettre à jour le cache
                                         let key = (symbol.clone(), timeframe.clone());
-                                        cache.write().unwrap().insert(key, candle);
+                                        cache.write().unwrap().insert(key, candle.clone());
+
+                                        // Broadcaster la mise à jour aux clients WebSocket
+                                        let update = CandleUpdate {
+                                            symbol: symbol.clone(),
+                                            timeframe: timeframe.clone(),
+                                            candle,
+                                        };
+                                        let _ = broadcast_tx.send(update);
                                     }
                                 }
                             }

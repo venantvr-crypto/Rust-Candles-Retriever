@@ -10,6 +10,7 @@ use binance::api::*;
 use binance::market::*;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::Parser;
+use futures_util::future;
 use rust_candles_retriever::{database::DatabaseManager, retriever::CandleRetriever};
 
 /// Arguments CLI du programme
@@ -29,7 +30,8 @@ struct Args {
     db_dir: String,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
     let symbol = args.symbol.to_uppercase();
 
@@ -40,21 +42,22 @@ fn main() -> Result<()> {
     println!("Fichier de base de données: {}", db_file);
 
     // Initialiser la base de données (sera créée si elle n'existe pas)
-    let mut db = DatabaseManager::new(&db_file)?;
+    let db = DatabaseManager::new(&db_file)?;
     println!("Base de données initialisée.\n");
+    drop(db); // Fermer la connexion initiale
 
     // Timeframes supportés - liste dynamique
-    let mut active_timeframes: Vec<&str> = vec![
+    let mut active_timeframes: Vec<String> = vec![
         "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d",
-    ];
-
-    // Initialiser le client Binance
-    let market: Market = Binance::new(None, None);
+    ]
+    .into_iter()
+    .map(|s| s.to_string())
+    .collect();
 
     // Parser la date de début si fournie
     let start_timestamp_ms = parse_start_date(args.start_date.as_deref())?;
 
-    // Boucle principale: traiter tous les timeframes simultanément
+    // Boucle principale: traiter tous les timeframes en parallèle
     let mut iteration = 0;
     loop {
         iteration += 1;
@@ -66,38 +69,71 @@ fn main() -> Result<()> {
             break;
         }
 
+        // Créer une tâche pour chaque timeframe
+        let mut tasks = Vec::new();
+
+        for tf in active_timeframes.clone() {
+            let symbol_clone = symbol.clone();
+            let db_file_clone = db_file.clone();
+
+            // Spawner une tâche bloquante pour chaque timeframe
+            let task = tokio::task::spawn_blocking(move || {
+                // Créer une connexion DB par tâche (SQLite ne supporte pas bien la concurrence)
+                let mut db = match DatabaseManager::new(&db_file_clone) {
+                    Ok(db) => db,
+                    Err(e) => return (tf.clone(), Err(anyhow::anyhow!("DB error: {}", e))),
+                };
+
+                // Initialiser le client Binance
+                let market: Market = Binance::new(None, None);
+
+                let mut retriever = CandleRetriever::new(
+                    &market,
+                    db.connection_mut(),
+                    &symbol_clone,
+                    &tf,
+                    start_timestamp_ms,
+                );
+
+                let result = retriever.fetch_one_batch();
+                (tf, result)
+            });
+
+            tasks.push(task);
+        }
+
+        // Attendre que toutes les tâches se terminent
+        let results = future::join_all(tasks).await;
+
         let mut exhausted_timeframes = Vec::new();
 
-        // Traiter chaque timeframe actif
-        for tf in &active_timeframes {
-            println!("→ Traitement du timeframe {}...", tf);
+        // Traiter les résultats
+        for result in results {
+            match result {
+                Ok((tf, fetch_result)) => {
+                    match fetch_result {
+                        Ok((inserted, is_exhausted)) => {
+                            if inserted > 0 {
+                                println!("  ✓ {} : {} nouvelles bougies insérées", tf, inserted);
+                            }
 
-            let mut retriever = CandleRetriever::new(
-                &market,
-                db.connection_mut(),
-                &symbol,
-                tf,
-                start_timestamp_ms,
-            );
-
-            match retriever.fetch_one_batch() {
-                Ok((inserted, is_exhausted)) => {
-                    if inserted > 0 {
-                        println!("  ✓ {} nouvelles bougies insérées", inserted);
-                    }
-
-                    // Retirer du pool si: date limite atteinte OU plus d'insertions
-                    if is_exhausted || inserted == 0 {
-                        if is_exhausted {
-                            println!("  🏁 Timeframe {} épuisé (date limite atteinte)", tf);
-                        } else {
-                            println!("  🏁 Timeframe {} épuisé (plus de nouvelles données)", tf);
+                            // Retirer du pool si: date limite atteinte OU plus d'insertions
+                            if is_exhausted || inserted == 0 {
+                                if is_exhausted {
+                                    println!("  🏁 {} épuisé (date limite atteinte)", tf);
+                                } else {
+                                    println!("  🏁 {} épuisé (plus de nouvelles données)", tf);
+                                }
+                                exhausted_timeframes.push(tf);
+                            }
                         }
-                        exhausted_timeframes.push(*tf);
+                        Err(e) => {
+                            eprintln!("  ⚠  {} : Erreur: {}", tf, e);
+                        }
                     }
                 }
                 Err(e) => {
-                    eprintln!("  ⚠  Erreur: {}", e);
+                    eprintln!("  ⚠  Erreur de tâche: {}", e);
                 }
             }
         }
@@ -114,8 +150,8 @@ fn main() -> Result<()> {
 
         println!();
 
-        // Pause pour respecter les rate limits
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Pause pour respecter les rate limits de l'API
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
     println!("Toutes les opérations sont terminées.");

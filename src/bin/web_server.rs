@@ -7,25 +7,41 @@
 ///   - GET /api/pairs → liste des paires disponibles
 ///   - GET /api/candles?symbol=X&timeframe=5m&limit=1000&offset=0
 ///   - GET /api/realtime/candles?symbol=X&timeframes=5m,15m,1h → bougies partielles temps réel
+use actix::{Actor, ActorContext, AsyncContext, Handler, Message, StreamHandler};
 use actix_cors::Cors;
 use actix_files::Files;
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, web};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
+use actix_web_actors::ws;
 use binance::api::*;
 use binance::market::*;
+use moka::future::Cache;
 use rusqlite::{Connection, params};
 use rust_candles_retriever::realtime::RealtimeManager;
 use rust_candles_retriever::retriever::CandleRetriever;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Clé de cache pour les requêtes de candles
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct CacheKey {
+    symbol: String,
+    timeframe: String,
+    start: Option<i64>,
+    end: Option<i64>,
+    limit: usize,
+    offset: usize,
+}
 
 /// État partagé de l'application
 struct AppState {
     db_dir: String,
     realtime: Arc<RealtimeManager>,
+    candles_cache: Cache<CacheKey, Arc<Vec<Candle>>>,
 }
 
 /// Représentation d'une bougie pour l'API
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Candle {
     time: i64, // timestamp en secondes (pour Lightweight Charts)
     open: f64,
@@ -56,83 +72,93 @@ struct CandlesQuery {
 /// GET /api/pairs - Récupère toutes les paires disponibles en scannant les fichiers .db
 #[get("/api/pairs")]
 async fn get_pairs(data: web::Data<Mutex<AppState>>) -> impl Responder {
-    let state = data.lock().unwrap();
-
-    // Scanner tous les fichiers .db dans le répertoire
-    let db_dir = std::path::Path::new(&state.db_dir);
-    let entries = match std::fs::read_dir(db_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to read db directory: {}", e)
-            }));
-        }
+    let db_dir = {
+        let state = data.lock().unwrap();
+        state.db_dir.clone()
     };
 
-    let mut pairs_map: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    // Déplacer toutes les opérations DB dans web::block
+    let result = web::block(move || {
+        let db_path = std::path::Path::new(&db_dir);
+        let entries = std::fs::read_dir(db_path)
+            .map_err(|e| format!("Failed to read db directory: {}", e))?;
 
-    // Pour chaque fichier .db
-    for entry in entries.flatten() {
-        let path = entry.path();
+        let mut pairs_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
 
-        // Vérifier que c'est un fichier .db
-        if !path.is_file() {
-            continue;
+        // Pour chaque fichier .db
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            // Vérifier que c'est un fichier .db
+            if !path.is_file() {
+                continue;
+            }
+
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            if !file_name.ends_with(".db") {
+                continue;
+            }
+
+            // Extraire le symbole du nom de fichier (ex: BTCUSDT.db -> BTCUSDT)
+            let symbol = file_name.trim_end_matches(".db").to_string();
+
+            // Ouvrir la base de données pour récupérer les timeframes
+            let conn = match Connection::open(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to open {}: {}", file_name, e);
+                    continue;
+                }
+            };
+
+            // Récupérer les timeframes pour ce symbole
+            let mut stmt = match conn.prepare(
+                "SELECT DISTINCT timeframe
+                 FROM candlesticks
+                 WHERE provider = 'binance'
+                 ORDER BY timeframe",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to query timeframes for {}: {}", symbol, e);
+                    continue;
+                }
+            };
+
+            let timeframes: Vec<String> = match stmt.query_map([], |row| row.get(0)) {
+                Ok(rows) => rows.filter_map(Result::ok).collect(),
+                Err(e) => {
+                    eprintln!("Failed to map timeframes for {}: {}", symbol, e);
+                    continue;
+                }
+            };
+
+            pairs_map.insert(symbol, timeframes);
         }
 
-        let file_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
+        let pairs: Vec<TradingPair> = pairs_map
+            .into_iter()
+            .map(|(symbol, timeframes)| TradingPair { symbol, timeframes })
+            .collect();
 
-        if !file_name.ends_with(".db") {
-            continue;
-        }
+        Ok::<Vec<TradingPair>, String>(pairs)
+    })
+    .await;
 
-        // Extraire le symbole du nom de fichier (ex: BTCUSDT.db -> BTCUSDT)
-        let symbol = file_name.trim_end_matches(".db").to_string();
-
-        // Ouvrir la base de données pour récupérer les timeframes
-        let conn = match Connection::open(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Failed to open {}: {}", file_name, e);
-                continue;
-            }
-        };
-
-        // Récupérer les timeframes pour ce symbole
-        let mut stmt = match conn.prepare(
-            "SELECT DISTINCT timeframe
-             FROM candlesticks
-             WHERE provider = 'binance'
-             ORDER BY timeframe",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to query timeframes for {}: {}", symbol, e);
-                continue;
-            }
-        };
-
-        let timeframes: Vec<String> = match stmt.query_map([], |row| row.get(0)) {
-            Ok(rows) => rows.filter_map(Result::ok).collect(),
-            Err(e) => {
-                eprintln!("Failed to map timeframes for {}: {}", symbol, e);
-                continue;
-            }
-        };
-
-        pairs_map.insert(symbol, timeframes);
+    match result {
+        Ok(Ok(pairs)) => HttpResponse::Ok().json(pairs),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Blocking error: {}", e)
+        })),
     }
-
-    let pairs: Vec<TradingPair> = pairs_map
-        .into_iter()
-        .map(|(symbol, timeframes)| TradingPair { symbol, timeframes })
-        .collect();
-
-    HttpResponse::Ok().json(pairs)
 }
 
 /// GET /api/candles - Récupère les candles pour une paire/timeframe
@@ -141,127 +167,149 @@ async fn get_candles(
     data: web::Data<Mutex<AppState>>,
     query: web::Query<CandlesQuery>,
 ) -> impl Responder {
-    let state = data.lock().unwrap();
-
-    // Construire le chemin vers la base de données de la paire
-    let db_path = format!("{}/{}.db", state.db_dir, query.symbol);
-
-    let conn = match Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error for {}: {}", query.symbol, e)
-            }));
-        }
-    };
-
-    // Construire la requête SQL selon les paramètres
-    let mut sql = String::from(
-        "SELECT open_time, open, high, low, close, volume
-         FROM candlesticks
-         WHERE provider = 'binance'
-           AND symbol = ?1
-           AND timeframe = ?2",
-    );
-
-    let mut param_index = 3;
-
-    // Ajouter filtre sur start (timestamp en secondes -> convertir en ms pour la DB)
-    if query.start.is_some() {
-        sql.push_str(&format!(" AND open_time >= ?{}", param_index));
-        param_index += 1;
-    }
-
-    // Ajouter filtre sur end
-    if query.end.is_some() {
-        sql.push_str(&format!(" AND open_time <= ?{}", param_index));
-        param_index += 1;
-    }
-
-    sql.push_str(" ORDER BY open_time ASC"); // ASC pour avoir l'ordre chronologique direct
-
-    // Ajouter LIMIT et OFFSET
-    sql.push_str(&format!(" LIMIT ?{}", param_index));
-    param_index += 1;
-    sql.push_str(&format!(" OFFSET ?{}", param_index));
-
+    let symbol = query.symbol.clone();
+    let timeframe = query.timeframe.clone();
+    let start = query.start;
+    let end = query.end;
     let limit = query.limit.unwrap_or(2000);
     let offset = query.offset.unwrap_or(0);
 
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Query error: {}", e)
-            }));
-        }
+    // Construire la clé de cache
+    let cache_key = CacheKey {
+        symbol: symbol.clone(),
+        timeframe: timeframe.clone(),
+        start,
+        end,
+        limit,
+        offset,
     };
 
-    // Construire les paramètres dynamiquement
-    let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-        Box::new(query.symbol.clone()),
-        Box::new(query.timeframe.clone()),
-    ];
-
-    if let Some(start) = query.start {
-        query_params.push(Box::new(start * 1000)); // Convertir secondes en ms
-    }
-
-    if let Some(end) = query.end {
-        query_params.push(Box::new(end * 1000)); // Convertir secondes en ms
-    }
-
-    query_params.push(Box::new(limit));
-    query_params.push(Box::new(offset));
-
-    let params_refs: Vec<&dyn rusqlite::ToSql> = query_params.iter().map(|p| p.as_ref()).collect();
-
-    let candles_iter = match stmt.query_map(params_refs.as_slice(), |row| {
-        Ok(Candle {
-            time: row.get::<_, i64>(0)? / 1000, // Convertir ms en secondes
-            open: row.get(1)?,
-            high: row.get(2)?,
-            low: row.get(3)?,
-            close: row.get(4)?,
-            volume: row.get(5)?,
-        })
-    }) {
-        Ok(iter) => iter,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Query mapping error: {}", e)
-            }));
-        }
+    // Extraire db_dir et cache en dehors du closure
+    let (db_dir, cache) = {
+        let state = data.lock().unwrap();
+        (state.db_dir.clone(), state.candles_cache.clone())
     };
 
-    let mut candles: Vec<Candle> = Vec::new();
-    for candle_result in candles_iter {
-        if let Ok(candle) = candle_result {
-            candles.push(candle);
-        }
+    // Vérifier le cache d'abord
+    if let Some(cached_candles) = cache.get(&cache_key).await {
+        return HttpResponse::Ok()
+            .insert_header(("X-Cache", "HIT"))
+            .json(cached_candles.as_ref());
     }
 
-    // Si aucune donnée, essayer le rééchantillonnage depuis une TF inférieure
-    if candles.is_empty() {
-        if let Some(smaller_tf) = find_smaller_timeframe(&conn, &query.symbol, &query.timeframe) {
-            println!(
-                "⚠️ Pas de données pour {} {}, rééchantillonnage depuis {}",
-                query.symbol, query.timeframe, smaller_tf
-            );
+    // Cache miss - exécuter la requête DB
+    let result = web::block(move || {
+        let db_path = format!("{}/{}.db", db_dir, symbol);
 
-            candles = resample_candles(
-                &conn,
-                &query.symbol,
-                &smaller_tf,
-                &query.timeframe,
-                query.start,
-                query.end,
-                limit,
-            );
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("Database error for {}: {}", symbol, e))?;
+
+        // Construire la requête SQL selon les paramètres
+        let mut sql = String::from(
+            "SELECT open_time, open, high, low, close, volume
+             FROM candlesticks
+             WHERE provider = 'binance'
+               AND symbol = ?1
+               AND timeframe = ?2",
+        );
+
+        let mut param_index = 3;
+
+        // Ajouter filtre sur start (timestamp en secondes -> convertir en ms pour la DB)
+        if start.is_some() {
+            sql.push_str(&format!(" AND open_time >= ?{}", param_index));
+            param_index += 1;
         }
-    }
 
-    HttpResponse::Ok().json(candles)
+        // Ajouter filtre sur end
+        if end.is_some() {
+            sql.push_str(&format!(" AND open_time <= ?{}", param_index));
+            param_index += 1;
+        }
+
+        sql.push_str(" ORDER BY open_time ASC"); // ASC pour avoir l'ordre chronologique direct
+
+        // Ajouter LIMIT et OFFSET
+        sql.push_str(&format!(" LIMIT ?{}", param_index));
+        param_index += 1;
+        sql.push_str(&format!(" OFFSET ?{}", param_index));
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        // Construire les paramètres dynamiquement
+        let mut query_params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(symbol.clone()), Box::new(timeframe.clone())];
+
+        if let Some(s) = start {
+            query_params.push(Box::new(s * 1000)); // Convertir secondes en ms
+        }
+
+        if let Some(e) = end {
+            query_params.push(Box::new(e * 1000)); // Convertir secondes en ms
+        }
+
+        query_params.push(Box::new(limit));
+        query_params.push(Box::new(offset));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            query_params.iter().map(|p| p.as_ref()).collect();
+
+        let candles_iter = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(Candle {
+                    time: row.get::<_, i64>(0)? / 1000, // Convertir ms en secondes
+                    open: row.get(1)?,
+                    high: row.get(2)?,
+                    low: row.get(3)?,
+                    close: row.get(4)?,
+                    volume: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("Query mapping error: {}", e))?;
+
+        let mut candles: Vec<Candle> = Vec::new();
+        for candle_result in candles_iter {
+            if let Ok(candle) = candle_result {
+                candles.push(candle);
+            }
+        }
+
+        // Si aucune donnée, essayer le rééchantillonnage depuis une TF inférieure
+        if candles.is_empty() {
+            if let Some(smaller_tf) = find_smaller_timeframe(&conn, &symbol, &timeframe) {
+                println!(
+                    "⚠️ Pas de données pour {} {}, rééchantillonnage depuis {}",
+                    symbol, timeframe, smaller_tf
+                );
+
+                candles =
+                    resample_candles(&conn, &symbol, &smaller_tf, &timeframe, start, end, limit);
+            }
+        }
+
+        Ok::<Vec<Candle>, String>(candles)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(candles)) => {
+            // Stocker dans le cache (TTL configuré au niveau du builder)
+            let candles_arc = Arc::new(candles);
+            cache.insert(cache_key, candles_arc.clone()).await;
+
+            HttpResponse::Ok()
+                .insert_header(("X-Cache", "MISS"))
+                .json(candles_arc.as_ref())
+        }
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Blocking error: {}", e)
+        })),
+    }
 }
 
 /// Paramètres de requête pour les bougies temps réel
@@ -591,6 +639,239 @@ fn aggregate_candles(candles: &[&Candle], period_start: i64) -> Candle {
 }
 
 /// GET /health - Health check
+/// ============================================================================
+/// MODULE WEBSOCKET - Communication temps réel avec les clients frontend
+/// ============================================================================
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Message WebSocket du client
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action")]
+enum ClientMessage {
+    #[serde(rename = "subscribe")]
+    Subscribe {
+        symbol: String,
+        timeframes: Vec<String>,
+    },
+    #[serde(rename = "unsubscribe")]
+    Unsubscribe {
+        symbol: String,
+        timeframes: Vec<String>,
+    },
+    #[serde(rename = "ping")]
+    Ping,
+}
+
+/// Message WebSocket vers le client
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum ServerMessage {
+    #[serde(rename = "candle_update")]
+    CandleUpdate {
+        symbol: String,
+        timeframe: String,
+        candle: rust_candles_retriever::realtime::RealtimeCandle,
+    },
+    #[serde(rename = "subscribed")]
+    Subscribed {
+        symbol: String,
+        timeframes: Vec<String>,
+    },
+    #[serde(rename = "pong")]
+    Pong,
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+/// Message Actix pour envoyer des mises à jour au client WebSocket
+#[derive(Message, Clone)]
+#[rtype(result = "()")]
+struct BroadcastUpdate(rust_candles_retriever::realtime::CandleUpdate);
+
+/// Session WebSocket pour un client
+struct WsSession {
+    /// Timestamp du dernier heartbeat
+    hb: Instant,
+    /// Référence au RealtimeManager
+    realtime: Arc<RealtimeManager>,
+    /// Souscriptions actives du client: (symbol, timeframe)
+    subscriptions: Vec<(String, String)>,
+}
+
+impl WsSession {
+    fn new(realtime: Arc<RealtimeManager>) -> Self {
+        Self {
+            hb: Instant::now(),
+            realtime,
+            subscriptions: Vec::new(),
+        }
+    }
+
+    /// Démarre le heartbeat
+    fn start_heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
+        ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
+            if Instant::now().duration_since(act.hb) > CLIENT_TIMEOUT {
+                println!("⚠️ Client heartbeat timeout, disconnecting");
+                ctx.stop();
+                return;
+            }
+            ctx.ping(b"");
+        });
+    }
+
+    /// Démarre l'écoute du canal de broadcast
+    fn start_broadcast_listener(&self, ctx: &mut ws::WebsocketContext<Self>) {
+        let mut rx = self.realtime.subscribe_updates();
+        let addr = ctx.address();
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(update) => {
+                        addr.do_send(BroadcastUpdate(update));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        eprintln!("⚠️ Broadcast lagging, some messages dropped");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+impl Actor for WsSession {
+    type Context = ws::WebsocketContext<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        println!("🔌 New WebSocket client connected");
+        self.start_heartbeat(ctx);
+        self.start_broadcast_listener(ctx);
+    }
+
+    fn stopped(&mut self, _: &mut Self::Context) {
+        println!("🔌 WebSocket client disconnected");
+        // Désabonner de tous les streams
+        for (symbol, timeframe) in &self.subscriptions {
+            self.realtime.unsubscribe(symbol.clone(), timeframe.clone());
+        }
+    }
+}
+
+/// Handler pour les mises à jour de broadcast
+impl Handler<BroadcastUpdate> for WsSession {
+    type Result = ();
+
+    fn handle(&mut self, msg: BroadcastUpdate, ctx: &mut Self::Context) {
+        let update = msg.0;
+
+        // Filtrer: envoyer seulement si le client est abonné à ce (symbol, timeframe)
+        if self
+            .subscriptions
+            .contains(&(update.symbol.clone(), update.timeframe.clone()))
+        {
+            let server_msg = ServerMessage::CandleUpdate {
+                symbol: update.symbol,
+                timeframe: update.timeframe,
+                candle: update.candle,
+            };
+
+            if let Ok(json) = serde_json::to_string(&server_msg) {
+                ctx.text(json);
+            }
+        }
+    }
+}
+
+/// Handler pour les messages WebSocket texte
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
+    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+        match msg {
+            Ok(ws::Message::Text(text)) => {
+                self.hb = Instant::now();
+
+                // Parser le message JSON du client
+                match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(ClientMessage::Subscribe { symbol, timeframes }) => {
+                        println!("📥 Client subscribing to {} {:?}", symbol, timeframes);
+
+                        // Souscrire aux streams Binance
+                        for tf in &timeframes {
+                            self.realtime.subscribe(symbol.clone(), tf.clone());
+                            self.subscriptions.push((symbol.clone(), tf.clone()));
+                        }
+
+                        // Confirmer la souscription
+                        let response = ServerMessage::Subscribed {
+                            symbol: symbol.clone(),
+                            timeframes: timeframes.clone(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&response) {
+                            ctx.text(json);
+                        }
+                    }
+                    Ok(ClientMessage::Unsubscribe { symbol, timeframes }) => {
+                        println!("📥 Client unsubscribing from {} {:?}", symbol, timeframes);
+
+                        for tf in &timeframes {
+                            self.realtime.unsubscribe(symbol.clone(), tf.clone());
+                            self.subscriptions
+                                .retain(|(s, t)| !(s == &symbol && t == tf));
+                        }
+                    }
+                    Ok(ClientMessage::Ping) => {
+                        let response = ServerMessage::Pong;
+                        if let Ok(json) = serde_json::to_string(&response) {
+                            ctx.text(json);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Failed to parse client message: {}", e);
+                        let error = ServerMessage::Error {
+                            message: format!("Invalid message format: {}", e),
+                        };
+                        if let Ok(json) = serde_json::to_string(&error) {
+                            ctx.text(json);
+                        }
+                    }
+                }
+            }
+            Ok(ws::Message::Ping(msg)) => {
+                self.hb = Instant::now();
+                ctx.pong(&msg);
+            }
+            Ok(ws::Message::Pong(_)) => {
+                self.hb = Instant::now();
+            }
+            Ok(ws::Message::Close(reason)) => {
+                println!("🔌 Client closing connection: {:?}", reason);
+                ctx.close(reason);
+                ctx.stop();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Endpoint WebSocket pour les mises à jour temps réel
+async fn ws_realtime(
+    req: HttpRequest,
+    stream: web::Payload,
+    data: web::Data<Mutex<AppState>>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let realtime = {
+        let state = data.lock().unwrap();
+        Arc::clone(&state.realtime)
+    };
+
+    let session = WsSession::new(realtime);
+    ws::start(session, &req, stream)
+}
+
 #[get("/health")]
 async fn health() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
@@ -615,7 +896,18 @@ async fn main() -> std::io::Result<()> {
     let realtime = Arc::new(RealtimeManager::new());
     println!("🔌 Gestionnaire WebSocket temps réel initialisé");
 
-    let app_state = web::Data::new(Mutex::new(AppState { db_dir, realtime }));
+    // Initialiser le cache pour les requêtes de candles
+    let candles_cache: Cache<CacheKey, Arc<Vec<Candle>>> = Cache::builder()
+        .max_capacity(1000)
+        .time_to_live(Duration::from_secs(60))
+        .build();
+    println!("💾 Cache de candles initialisé (max 1000 entrées, TTL 60s)");
+
+    let app_state = web::Data::new(Mutex::new(AppState {
+        db_dir,
+        realtime,
+        candles_cache,
+    }));
 
     HttpServer::new(move || {
         let cors = Cors::permissive();
@@ -626,9 +918,8 @@ async fn main() -> std::io::Result<()> {
             .service(health)
             .service(get_pairs)
             .service(get_candles)
-            .service(get_realtime_candles)
-            .service(subscribe_realtime)
             .service(fetch_gaps)
+            .route("/ws/realtime", web::get().to(ws_realtime))
             .service(Files::new("/", "./web").index_file("index.html"))
     })
     .bind(("127.0.0.1", port))?
