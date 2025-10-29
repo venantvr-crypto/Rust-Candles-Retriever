@@ -42863,6 +42863,7 @@ var ChartEngine = class _ChartEngine {
     this.realtimeWs = null;
     this.realtimeSubscribed = /* @__PURE__ */ new Set();
     this.realtimeUpdating = false;
+    this.candleCache = /* @__PURE__ */ new Map();
     this.renderScheduled = false;
     this.overlayRenderScheduled = false;
     this.rafId = null;
@@ -43154,18 +43155,30 @@ var ChartEngine = class _ChartEngine {
     }
     return false;
   }
-  checkAndReloadData() {
+  async checkAndReloadData() {
     if (this.state.isLoading || this.state.data.length === 0) return;
-    const dataStart = this.state.data[0].time;
-    const dataEnd = this.state.data[this.state.data.length - 1].time;
     const viewWidth = this.state.viewEnd - this.state.viewStart;
-    const threshold = viewWidth * 0.5;
-    const needsReload = this.state.viewStart < dataStart + threshold || this.state.viewEnd > dataEnd - threshold;
-    if (needsReload) {
-      console.log(`\u{1F504} Reloading data - view approaching data boundaries`);
-      console.log(`   Data range: ${new Date(dataStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(dataEnd * 1e3).toISOString().substring(0, 16)}`);
-      console.log(`   View range: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
-      this.loadData(this.state.symbol, this.state.currentTimeframe);
+    const margin = viewWidth * 2;
+    const checkStart = this.state.viewStart - margin;
+    const checkEnd = this.state.viewEnd + margin;
+    const hasMissing = this.hasMissingDataInRange(checkStart, checkEnd);
+    if (hasMissing) {
+      console.log(`\u{1F50D} Detected missing data in view range`);
+      console.log(`   View: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+      console.log(`   Check: ${new Date(checkStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(checkEnd * 1e3).toISOString().substring(0, 16)}`);
+      const loaded = await this.loadMissingSegments(
+        this.state.symbol,
+        this.state.currentTimeframe,
+        checkStart,
+        checkEnd
+      );
+      if (loaded) {
+        this.updateStateDataFromCache(this.state.viewStart, this.state.viewEnd);
+        const prices = this.state.data.flatMap((c2) => [c2.high, c2.low]);
+        this.state.priceMin = Math.min(...prices);
+        this.state.priceMax = Math.max(...prices);
+        this.render();
+      }
     }
   }
   updateCrosshair() {
@@ -43186,12 +43199,118 @@ var ChartEngine = class _ChartEngine {
     }
     this.state.crosshairCandle = closest;
   }
+  // ========== Fonctions utilitaires pour le cache ==========
+  getCacheKey(symbol, timeframe) {
+    return `${symbol}:${timeframe}`;
+  }
+  mergeCandleArrays(existing, newData) {
+    const map = /* @__PURE__ */ new Map();
+    for (const candle of existing) {
+      map.set(candle.time, candle);
+    }
+    for (const candle of newData) {
+      map.set(candle.time, candle);
+    }
+    return Array.from(map.values()).sort((a2, b2) => a2.time - b2.time);
+  }
+  findMissingSegments(cached, start, end) {
+    if (cached.length === 0) {
+      return [{ start, end }];
+    }
+    const segments = [];
+    const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
+    const firstCandleTime = cached[0].time;
+    if (start < firstCandleTime - tfSeconds) {
+      segments.push({ start, end: firstCandleTime - tfSeconds });
+    }
+    for (let i2 = 0; i2 < cached.length - 1; i2++) {
+      const gap = cached[i2 + 1].time - cached[i2].time;
+      if (gap > tfSeconds * 2) {
+        const gapStart = cached[i2].time + tfSeconds;
+        const gapEnd = cached[i2 + 1].time - tfSeconds;
+        if (gapEnd >= start && gapStart <= end) {
+          segments.push({
+            start: Math.max(gapStart, start),
+            end: Math.min(gapEnd, end)
+          });
+        }
+      }
+    }
+    const lastCandleTime = cached[cached.length - 1].time;
+    if (end > lastCandleTime + tfSeconds) {
+      segments.push({ start: lastCandleTime + tfSeconds, end });
+    }
+    return segments;
+  }
+  hasMissingDataInRange(start, end) {
+    const key = this.getCacheKey(this.state.symbol, this.state.currentTimeframe);
+    const cached = this.candleCache.get(key) || [];
+    if (cached.length === 0) return true;
+    const segments = this.findMissingSegments(cached, start, end);
+    return segments.length > 0;
+  }
+  updateStateDataFromCache(start, end) {
+    const key = this.getCacheKey(this.state.symbol, this.state.currentTimeframe);
+    const cached = this.candleCache.get(key) || [];
+    const margin = (end - start) * 2;
+    this.state.data = cached.filter(
+      (c2) => c2.time >= start - margin && c2.time <= end + margin
+    );
+    console.log(`\u{1F4E6} Updated state.data from cache: ${this.state.data.length} candles (cache has ${cached.length})`);
+  }
+  mergeIntoCandleCache(key, newData) {
+    const existing = this.candleCache.get(key) || [];
+    const merged = this.mergeCandleArrays(existing, newData);
+    this.candleCache.set(key, merged);
+    console.log(`\u{1F4E6} Merged into cache [${key}]: ${existing.length} + ${newData.length} = ${merged.length} candles`);
+    this.updateRSIHistoricalCaches();
+  }
+  updateRSIHistoricalCaches() {
+    if (!this.rsiHistoricalData) return;
+    const period = chartConfig.get("indicators.rsi.period") || 14;
+    const maxSamples = period * 2;
+    for (const tf of this.rsiData.keys()) {
+      const key = this.getCacheKey(this.state.symbol, tf);
+      const cached = this.candleCache.get(key) || [];
+      if (cached.length > 0) {
+        this.rsiHistoricalData.set(tf, cached.slice(-maxSamples));
+      }
+    }
+  }
+  async loadMissingSegments(symbol, timeframe, start, end) {
+    const key = this.getCacheKey(symbol, timeframe);
+    const cached = this.candleCache.get(key) || [];
+    const segments = this.findMissingSegments(cached, start, end);
+    if (segments.length === 0) {
+      console.log(`\u2705 No missing data for [${key}] in range`);
+      return false;
+    }
+    console.log(`\u{1F50D} Found ${segments.length} missing segment(s) for [${key}]`);
+    let hasLoadedData = false;
+    for (const seg of segments) {
+      try {
+        console.log(`\u{1F4E1} Loading segment: ${new Date(seg.start * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(seg.end * 1e3).toISOString().substring(0, 16)}`);
+        const data = await this.callbacks.onLoadData(symbol, timeframe, seg.start, seg.end);
+        if (data && data.length > 0) {
+          this.mergeIntoCandleCache(key, data);
+          hasLoadedData = true;
+          console.log(`\u2705 Loaded ${data.length} candles for segment`);
+        } else {
+          console.log(`\u26A0\uFE0F No data returned for segment`);
+        }
+      } catch (e2) {
+        console.error(`\u274C Failed to load segment:`, e2);
+      }
+    }
+    return hasLoadedData;
+  }
   async loadData(symbol, timeframe, savedRange = null) {
     console.log(`\u{1F4CA} loadData() called: symbol=${symbol}, TF=${timeframe}, isLoading=${this.state.isLoading}`);
     if (this.state.isLoading) {
       console.warn("\u26A0\uFE0F Already loading data, ignoring loadData() call");
       return;
     }
+    const key = this.getCacheKey(symbol, timeframe);
     if (savedRange === null && this.state.data.length > 0 && this.state.viewStart !== 0) {
       savedRange = {
         start: this.state.viewStart,
@@ -43217,20 +43336,35 @@ var ChartEngine = class _ChartEngine {
         fetchStart = Math.floor(this.state.viewStart - margin);
         fetchEnd = Math.ceil(this.state.viewEnd + margin);
       }
-      console.log(`\u{1F4E1} Fetching data range: ${fetchStart ? new Date(fetchStart * 1e3).toISOString().substring(0, 16) : "auto"} \u2192 ${fetchEnd ? new Date(fetchEnd * 1e3).toISOString().substring(0, 16) : "auto"}`);
-      let data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
-      if (!Array.isArray(data) || data.length === 0) {
-        throw new Error("No data received");
+      if (fetchStart === null || fetchEnd === null) {
+        console.log(`\u{1F4E1} Loading latest data (no range specified)`);
+        const data = await this.callbacks.onLoadData(symbol, timeframe, null, null);
+        if (!Array.isArray(data) || data.length === 0) {
+          throw new Error("No data received");
+        }
+        this.mergeIntoCandleCache(key, data);
+        console.log(`\u2705 Loaded ${data.length} candles for ${symbol} ${timeframe}`);
+      } else {
+        console.log(`\u{1F4E1} Loading range: ${new Date(fetchStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(fetchEnd * 1e3).toISOString().substring(0, 16)}`);
+        await this.loadMissingSegments(symbol, timeframe, fetchStart, fetchEnd);
       }
-      this.state.data = data;
-      console.log(`\u2705 Loaded ${data.length} candles for ${symbol} ${timeframe}`);
-      const didFetch = await this.fillGapsIfNeeded(symbol, timeframe, data);
+      const cached = this.candleCache.get(key) || [];
+      if (cached.length === 0) {
+        throw new Error("No data in cache after loading");
+      }
+      if (savedRange) {
+        this.updateStateDataFromCache(savedRange.start, savedRange.end);
+      } else {
+        const lastCandles = cached.slice(-1e3);
+        this.state.data = lastCandles;
+      }
+      console.log(`\u2705 state.data has ${this.state.data.length} candles (cache has ${cached.length})`);
+      const didFetch = await this.fillGapsIfNeeded(symbol, timeframe, this.state.data);
       if (didFetch) {
-        data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
-        this.state.data = data;
-        console.log(`\u{1F504} Reloaded ${data.length} candles apr\xE8s fetch`);
+        this.updateStateDataFromCache(this.state.viewStart, this.state.viewEnd);
+        console.log(`\u{1F504} Reloaded state.data after gap fill: ${this.state.data.length} candles`);
       }
-      const prices = data.flatMap((c2) => [c2.high, c2.low]);
+      const prices = this.state.data.flatMap((c2) => [c2.high, c2.low]);
       this.state.priceMin = Math.min(...prices);
       this.state.priceMax = Math.max(...prices);
       if (savedRange === null) {
@@ -43541,14 +43675,14 @@ var ChartEngine = class _ChartEngine {
     for (const tf of rsiTimeframes) {
       try {
         const margin = (this.state.viewEnd - this.state.viewStart) * 2;
+        const fetchStart = Math.floor(this.state.viewStart - margin);
+        const fetchEnd = Math.ceil(this.state.viewEnd + margin);
         console.log(`\u{1F4CA} Loading ${tf} data for RSI (${this.state.symbol})...`);
-        let data = await this.callbacks.onLoadData(
-          this.state.symbol,
-          tf,
-          Math.floor(this.state.viewStart - margin),
-          Math.ceil(this.state.viewEnd + margin)
-        );
-        console.log(`\u{1F4CA} Loaded ${data?.length || 0} candles for ${tf}`);
+        await this.loadMissingSegments(this.state.symbol, tf, fetchStart, fetchEnd);
+        const key = this.getCacheKey(this.state.symbol, tf);
+        const cached = this.candleCache.get(key) || [];
+        const data = cached.filter((c2) => c2.time >= fetchStart && c2.time <= fetchEnd);
+        console.log(`\u{1F4CA} Retrieved ${data.length} candles for ${tf} from cache (total cache: ${cached.length})`);
         if (data && data.length > period) {
           const maxSamples = period * 2;
           this.rsiHistoricalData.set(tf, data.slice(-maxSamples));
