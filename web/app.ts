@@ -125,7 +125,6 @@ async function loadCandles(savedRange: any = null): Promise<void> {
     }
 
     app.isLoading = true;
-    app.chart.state.isLoading = true;
     showLoading(true);
     updateStatus('Loading...');
 
@@ -137,7 +136,6 @@ async function loadCandles(savedRange: any = null): Promise<void> {
         updateStatus(`Error: ${error.message}`, true);
     } finally {
         app.isLoading = false;
-        app.chart.state.isLoading = false;
         showLoading(false);
     }
 }

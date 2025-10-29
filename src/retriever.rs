@@ -102,18 +102,53 @@ impl<'a> CandleRetriever<'a> {
         let last_stored =
             TimeframeStatus::get_last_candle_time(self.conn, PROVIDER, self.symbol, self.timeframe);
 
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+
         let end_time_ms = match last_stored {
             Some(last_time) => {
-                // Mode reprise: continuer depuis la dernière bougie
-                last_time
+                // Mode reprise: calculer les bougies manquantes
+                let gap_ms = now_ms - last_time;
+                let tf_seconds = Self::parse_timeframe_seconds(self.timeframe);
+                let tf_ms = tf_seconds * 1000;
+                let missing_candles = gap_ms / tf_ms;
+
+                if missing_candles > 2 {
+                    // Gap récent détecté (> 2 bougies): partir de maintenant pour combler d'abord
+                    println!(
+                        "  📍 Gap récent détecté ({} bougies manquantes), récupération depuis maintenant",
+                        missing_candles
+                    );
+                    now_ms
+                } else {
+                    // Données à jour ou bougie en cours, continuer en backward
+                    last_time
+                }
             }
             None => {
                 // Mode première exécution: partir de maintenant
-                SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64
+                now_ms
             }
         };
 
         Ok(end_time_ms)
+    }
+
+    /// Parse une timeframe en secondes
+    fn parse_timeframe_seconds(tf: &str) -> i64 {
+        let len = tf.len();
+        if len < 2 {
+            return 300; // Default 5m
+        }
+
+        let unit = &tf[len - 1..];
+        let value: i64 = tf[..len - 1].parse().unwrap_or(5);
+
+        match unit {
+            "m" => value * 60,
+            "h" => value * 3600,
+            "d" => value * 86400,
+            _ => 300,
+        }
     }
 
     /// Récupère un batch de bougies depuis l'API Binance (TOUJOURS en backward)

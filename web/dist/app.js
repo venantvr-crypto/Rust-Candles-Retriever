@@ -42782,6 +42782,7 @@ extensions.add(browserExt, webworkerExt);
 
 // chart-engine.ts
 var ChartEngine = class _ChartEngine {
+  // Flag pour éviter appels concurrents
   constructor(container, app2, options = {}) {
     this.container = container;
     this.app = app2;
@@ -42841,6 +42842,10 @@ var ChartEngine = class _ChartEngine {
     this.timeframes = [];
     this.rsiData = /* @__PURE__ */ new Map();
     this.rsiVisibility = /* @__PURE__ */ new Map();
+    this.realtimeCandles = /* @__PURE__ */ new Map();
+    this.realtimePolling = null;
+    this.realtimeSubscribed = /* @__PURE__ */ new Set();
+    this.realtimeUpdating = false;
     this.legendContainer = document.createElement("div");
     this.legendContainer.style.cssText = "position: absolute; bottom: 45px; left: 80px; z-index: 10; pointer-events: auto;";
     this.container.appendChild(this.legendContainer);
@@ -43162,6 +43167,11 @@ var ChartEngine = class _ChartEngine {
     this.state.crosshairCandle = closest;
   }
   async loadData(symbol, timeframe, savedRange = null) {
+    console.log(`\u{1F4CA} loadData() called: symbol=${symbol}, TF=${timeframe}, isLoading=${this.state.isLoading}`);
+    if (this.state.isLoading) {
+      console.warn("\u26A0\uFE0F Already loading data, ignoring loadData() call");
+      return;
+    }
     if (savedRange === null && this.state.data.length > 0 && this.state.viewStart !== 0) {
       savedRange = {
         start: this.state.viewStart,
@@ -43188,12 +43198,18 @@ var ChartEngine = class _ChartEngine {
         fetchEnd = Math.ceil(this.state.viewEnd + margin);
       }
       console.log(`\u{1F4E1} Fetching data range: ${fetchStart ? new Date(fetchStart * 1e3).toISOString().substring(0, 16) : "auto"} \u2192 ${fetchEnd ? new Date(fetchEnd * 1e3).toISOString().substring(0, 16) : "auto"}`);
-      const data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
+      let data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
       if (!Array.isArray(data) || data.length === 0) {
         throw new Error("No data received");
       }
       this.state.data = data;
       console.log(`\u2705 Loaded ${data.length} candles for ${symbol} ${timeframe}`);
+      const didFetch = await this.fillGapsIfNeeded(symbol, timeframe, data);
+      if (didFetch) {
+        data = await this.callbacks.onLoadData(symbol, timeframe, fetchStart, fetchEnd);
+        this.state.data = data;
+        console.log(`\u{1F504} Reloaded ${data.length} candles apr\xE8s fetch`);
+      }
       const prices = data.flatMap((c2) => [c2.high, c2.low]);
       this.state.priceMin = Math.min(...prices);
       this.state.priceMax = Math.max(...prices);
@@ -43205,11 +43221,212 @@ var ChartEngine = class _ChartEngine {
       await this.loadIndicatorData();
       this.renderBackground();
       this.render();
+      this.startRealtimeUpdates();
     } catch (error) {
       this.callbacks.onError(error);
       this.renderError(error.message);
     } finally {
       this.state.isLoading = false;
+    }
+  }
+  async fillGapsIfNeeded(symbol, timeframe, data) {
+    if (data.length === 0) return false;
+    const lastCandle = data[data.length - 1];
+    const now = Math.floor(Date.now() / 1e3);
+    const gapSeconds = now - lastCandle.time;
+    const tfSeconds = this.parseTimeframeToSeconds(timeframe);
+    const missingCandles = gapSeconds / tfSeconds;
+    if (missingCandles > 2) {
+      console.log(`\u{1F50D} Gap d\xE9tect\xE9: ${Math.floor(missingCandles)} bougies manquantes, fetch...`);
+      try {
+        const response = await fetch(`/api/fetch?symbol=${symbol}&timeframe=${timeframe}`, {
+          method: "POST"
+        });
+        if (response.ok) {
+          const result = await response.json();
+          if (result.inserted > 0) {
+            console.log(`\u2705 ${result.inserted} bougies ajout\xE9es`);
+            return true;
+          }
+        }
+      } catch (error) {
+        console.error("\u274C Erreur fetch:", error);
+      }
+    }
+    return false;
+  }
+  async startRealtimeUpdates() {
+    if (!this.state.symbol) {
+      console.warn("\u26A0\uFE0F Cannot start realtime updates: no symbol");
+      return;
+    }
+    if (this.realtimeUpdating) {
+      console.log("\u23ED\uFE0F  Already updating realtime, skipping");
+      return;
+    }
+    this.realtimeUpdating = true;
+    try {
+      const currentIdx = this.timeframes.indexOf(this.state.currentTimeframe);
+      const watchedTFs = /* @__PURE__ */ new Set();
+      if (currentIdx > 0) {
+        watchedTFs.add(this.timeframes[currentIdx - 1]);
+      }
+      watchedTFs.add(this.state.currentTimeframe);
+      if (currentIdx < this.timeframes.length - 1) {
+        watchedTFs.add(this.timeframes[currentIdx + 1]);
+      }
+      const tfArray = Array.from(watchedTFs).sort(
+        (a2, b2) => this.parseTimeframeToSeconds(a2) - this.parseTimeframeToSeconds(b2)
+      );
+      const newStreams = [];
+      for (const tf of tfArray) {
+        const streamKey = `${this.state.symbol}:${tf}`;
+        if (!this.realtimeSubscribed.has(streamKey)) {
+          newStreams.push(tf);
+          this.realtimeSubscribed.add(streamKey);
+        }
+      }
+      if (newStreams.length > 0) {
+        console.log(`\u{1F50C} Subscribing to new streams for ${this.state.symbol}: ${newStreams.join(", ")}`);
+        try {
+          const subscribeUrl = `/api/realtime/subscribe?symbol=${this.state.symbol}&timeframes=${newStreams.join(",")}`;
+          const subscribeResponse = await fetch(subscribeUrl, { method: "POST" });
+          if (subscribeResponse.ok) {
+            console.log(`\u2705 Subscribed to ${newStreams.length} new stream(s)`);
+          } else {
+            console.error("Failed to subscribe:", subscribeResponse.statusText);
+          }
+        } catch (error) {
+          console.error("Subscribe error:", error);
+        }
+      } else {
+        console.log(`\u267B\uFE0F  Already subscribed to all required streams`);
+      }
+      if (this.realtimePolling) {
+        clearInterval(this.realtimePolling);
+        this.realtimePolling = null;
+      }
+      const poll = async () => {
+        try {
+          const url = `/api/realtime/candles?symbol=${this.state.symbol}&timeframes=${tfArray.join(",")}`;
+          const response = await fetch(url);
+          if (!response.ok) {
+            console.error("Failed to fetch realtime candles:", response.statusText);
+            return;
+          }
+          const data = await response.json();
+          let needsRender = false;
+          for (const [tf, candle] of Object.entries(data)) {
+            if (candle) {
+              const updated = this.handleRealtimeCandle(tf, candle, candle.is_closed, false);
+              if (updated) needsRender = true;
+            }
+          }
+          if (needsRender) {
+            this.render();
+          }
+        } catch (error) {
+          console.error("Realtime polling error:", error);
+        }
+      };
+      if (newStreams.length > 0) {
+        setTimeout(poll, 500);
+      } else {
+        poll();
+      }
+      this.realtimePolling = window.setInterval(poll, 2e3);
+    } finally {
+      this.realtimeUpdating = false;
+    }
+  }
+  stopRealtimeUpdates() {
+    if (this.realtimePolling) {
+      clearInterval(this.realtimePolling);
+      this.realtimePolling = null;
+    }
+    this.realtimeCandles.clear();
+    console.log("\u{1F6D1} Stopped realtime polling");
+  }
+  handleRealtimeCandle(timeframe, candle, isComplete, shouldRender = true) {
+    this.realtimeCandles.set(timeframe, candle);
+    let updated = false;
+    if (timeframe === this.state.currentTimeframe) {
+      const lastIndex = this.state.data.length - 1;
+      if (lastIndex >= 0) {
+        const lastCandle = this.state.data[lastIndex];
+        const tfSeconds = this.parseTimeframeToSeconds(timeframe);
+        if (lastCandle.time === candle.time) {
+          this.state.data[lastIndex] = candle;
+          updated = true;
+        } else if (candle.time === lastCandle.time + tfSeconds) {
+          this.state.data.push(candle);
+          console.log(`\u2705 New candle added for ${timeframe} at ${new Date(candle.time * 1e3).toISOString().substring(0, 16)}`);
+          const isAtEnd = this.state.viewEnd >= lastCandle.time + tfSeconds * 0.5;
+          if (isAtEnd) {
+            const viewWidth = this.state.viewEnd - this.state.viewStart;
+            this.state.viewEnd = candle.time + tfSeconds;
+            this.state.viewStart = this.state.viewEnd - viewWidth;
+            console.log(`\u{1F4CD} Auto-scroll: view moved to ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+          }
+          updated = true;
+        } else if (candle.time > lastCandle.time + tfSeconds) {
+          console.log(`\u{1F4CD} Skipping gap (${Math.floor((candle.time - lastCandle.time - tfSeconds) / tfSeconds)} candles missing), adding current candle`);
+          this.state.data.push(candle);
+          updated = true;
+        }
+        if (updated) {
+          this.updateRealtimeRSI();
+          if (shouldRender) {
+            this.render();
+          }
+        }
+      }
+    } else {
+      if (isComplete) {
+        console.log(`\u{1F4CA} Complete candle on ${timeframe} (RSI update skipped for performance)`);
+        updated = true;
+      }
+    }
+    return updated;
+  }
+  async updateSingleTimeframeRSI(timeframe) {
+    if (!chartConfig.get("indicators.enabled")) return;
+    const period = chartConfig.get("indicators.rsi.period") || 14;
+    try {
+      const margin = (this.state.viewEnd - this.state.viewStart) * 2;
+      const data = await this.callbacks.onLoadData(
+        this.state.symbol,
+        timeframe,
+        Math.floor(this.state.viewStart - margin),
+        Math.ceil(this.state.viewEnd + margin)
+      );
+      if (data && data.length > period) {
+        const rsi = this.calculateRSI(data, period);
+        const referenceTimestamps = this.state.data.map((c2) => c2.time);
+        const resampled = this.resampleIndicatorToGrid(rsi, referenceTimestamps);
+        this.rsiData.set(timeframe, resampled);
+        console.log(`\u{1F4CA} Updated RSI for ${timeframe} (${resampled.length} points)`);
+        this.render();
+      }
+    } catch (e2) {
+      console.error(`\u274C Failed to update RSI for ${timeframe}:`, e2);
+    }
+  }
+  updateRealtimeRSI() {
+    if (!chartConfig.get("indicators.enabled")) return;
+    const period = chartConfig.get("indicators.rsi.period") || 14;
+    if (this.state.data.length > period + 1) {
+      const maxSamples = period * 2;
+      const dataToUse = this.state.data.length > maxSamples ? this.state.data.slice(-maxSamples) : this.state.data;
+      const rsi = this.calculateRSI(dataToUse, period);
+      const existingRSI = this.rsiData.get(this.state.currentTimeframe) || [];
+      const rsiPointsToReplace = Math.min(rsi.length, 10);
+      if (existingRSI.length > rsiPointsToReplace) {
+        const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
+        this.rsiData.set(this.state.currentTimeframe, updatedRSI);
+      } else {
+        this.rsiData.set(this.state.currentTimeframe, rsi);
+      }
     }
   }
   async loadIndicatorData() {
@@ -43241,7 +43458,7 @@ var ChartEngine = class _ChartEngine {
       try {
         const margin = (this.state.viewEnd - this.state.viewStart) * 2;
         console.log(`\u{1F4CA} Loading ${tf} data for RSI (${this.state.symbol})...`);
-        const data = await this.callbacks.onLoadData(
+        let data = await this.callbacks.onLoadData(
           this.state.symbol,
           tf,
           Math.floor(this.state.viewStart - margin),
@@ -43435,6 +43652,8 @@ var ChartEngine = class _ChartEngine {
     const wickWidth = chartConfig.get("candles.wickWidth");
     const hollowUp = chartConfig.get("candles.hollowUp");
     const minBodyHeight = chartConfig.get("candles.minBodyHeight");
+    const realtimeCandle = this.realtimeCandles.get(this.state.currentTimeframe);
+    const realtimeCandleTime = realtimeCandle?.time || null;
     visibleCandles.forEach((candle) => {
       const x2 = timeToX(candle.time);
       const yOpen = priceToY(candle.open);
@@ -43445,6 +43664,14 @@ var ChartEngine = class _ChartEngine {
       const color = parseInt(isUp ? this.theme.upColor.replace("#", "") : this.theme.downColor.replace("#", ""), 16);
       const borderColor = parseInt(isUp ? this.theme.upBorderColor.replace("#", "") : this.theme.downBorderColor.replace("#", ""), 16);
       const candleGraphics = new Graphics();
+      const isRealtimeCandle = realtimeCandleTime !== null && candle.time === realtimeCandleTime;
+      if (isRealtimeCandle) {
+        const markerY = yLow + 8;
+        candleGraphics.lineStyle(2, 8421504, 0.6);
+        candleGraphics.moveTo(x2 - candleWidth / 2, markerY);
+        candleGraphics.lineTo(x2 + candleWidth / 2, markerY);
+        candleGraphics.stroke();
+      }
       candleGraphics.lineStyle(wickWidth, color, 1);
       candleGraphics.moveTo(x2, yHigh);
       candleGraphics.lineTo(x2, yLow);
@@ -43838,8 +44065,20 @@ var ChartEngine = class _ChartEngine {
   renderTooltip(candle) {
     const padding = 8;
     const lineHeight = 16;
+    const date = new Date(candle.time * 1e3);
+    const utcStr = date.toISOString().substring(0, 19).replace("T", " ") + " UTC";
+    const parisStr = date.toLocaleString("fr-FR", {
+      timeZone: "Europe/Paris",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    }) + " CET/CEST";
     const lines = [
-      `Time: ${new Date(candle.time * 1e3).toISOString().substring(0, 16).replace("T", " ")}`,
+      `Time: ${utcStr}`,
+      `      ${parisStr}`,
       `Open:  ${candle.open.toFixed(2)}`,
       `High:  ${candle.high.toFixed(2)}`,
       `Low:   ${candle.low.toFixed(2)}`,
@@ -43904,6 +44143,7 @@ var ChartEngine = class _ChartEngine {
     return steps[steps.length - 1];
   }
   destroy() {
+    this.stopRealtimeUpdates();
     this.app.destroy(true, { children: true, texture: true });
     this.overlayCanvas.remove();
     this.legendContainer.remove();
@@ -43995,7 +44235,6 @@ async function loadCandles(savedRange = null) {
     return;
   }
   app.isLoading = true;
-  app.chart.state.isLoading = true;
   showLoading(true);
   updateStatus("Loading...");
   try {
@@ -44006,7 +44245,6 @@ async function loadCandles(savedRange = null) {
     updateStatus(`Error: ${error.message}`, true);
   } finally {
     app.isLoading = false;
-    app.chart.state.isLoading = false;
     showLoading(false);
   }
 }

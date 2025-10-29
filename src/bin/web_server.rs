@@ -6,16 +6,22 @@
 /// - Endpoints:
 ///   - GET /api/pairs → liste des paires disponibles
 ///   - GET /api/candles?symbol=X&timeframe=5m&limit=1000&offset=0
+///   - GET /api/realtime/candles?symbol=X&timeframes=5m,15m,1h → bougies partielles temps réel
 use actix_cors::Cors;
 use actix_files::Files;
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, web};
+use binance::api::*;
+use binance::market::*;
 use rusqlite::{Connection, params};
+use rust_candles_retriever::realtime::RealtimeManager;
+use rust_candles_retriever::retriever::CandleRetriever;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// État partagé de l'application
 struct AppState {
     db_dir: String,
+    realtime: Arc<RealtimeManager>,
 }
 
 /// Représentation d'une bougie pour l'API
@@ -258,6 +264,166 @@ async fn get_candles(
     HttpResponse::Ok().json(candles)
 }
 
+/// Paramètres de requête pour les bougies temps réel
+#[derive(Debug, Deserialize)]
+struct RealtimeCandlesQuery {
+    symbol: String,
+    timeframes: String, // Format: "5m,15m,1h"
+}
+
+/// GET /api/realtime/candles - Récupère les bougies partielles temps réel
+#[get("/api/realtime/candles")]
+async fn get_realtime_candles(
+    data: web::Data<Mutex<AppState>>,
+    query: web::Query<RealtimeCandlesQuery>,
+) -> impl Responder {
+    let state = data.lock().unwrap();
+
+    // Parser les timeframes
+    let timeframes: Vec<String> = query
+        .timeframes
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    // Récupérer les bougies partielles (sans re-souscrire)
+    let candles = state.realtime.get_candles(&query.symbol, &timeframes);
+
+    HttpResponse::Ok().json(candles)
+}
+
+/// Paramètres pour souscription manuelle
+#[derive(Debug, Deserialize)]
+struct SubscribeQuery {
+    symbol: String,
+    timeframes: String,
+}
+
+/// POST /api/realtime/subscribe - Souscrit à des streams
+#[actix_web::post("/api/realtime/subscribe")]
+async fn subscribe_realtime(
+    data: web::Data<Mutex<AppState>>,
+    query: web::Query<SubscribeQuery>,
+) -> impl Responder {
+    let state = data.lock().unwrap();
+
+    let timeframes: Vec<String> = query
+        .timeframes
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    for tf in &timeframes {
+        state.realtime.subscribe(query.symbol.clone(), tf.clone());
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "subscribed",
+        "symbol": query.symbol,
+        "timeframes": timeframes
+    }))
+}
+
+/// Paramètres pour fetch dynamique
+#[derive(Debug, Deserialize)]
+struct FetchQuery {
+    symbol: String,
+    timeframe: String,
+}
+
+/// POST /api/fetch - Comble les gaps dynamiquement (boucle jusqu'à complet)
+#[actix_web::post("/api/fetch")]
+async fn fetch_gaps(
+    data: web::Data<Mutex<AppState>>,
+    query: web::Query<FetchQuery>,
+) -> impl Responder {
+    let db_dir = data.lock().unwrap().db_dir.clone();
+    let symbol = query.symbol.clone();
+    let timeframe = query.timeframe.clone();
+
+    // Exécuter le fetch dans un thread bloquant avec son propre runtime
+    let result = web::block(move || {
+        let db_path = format!("{}/{}.db", db_dir, symbol);
+
+        // Vérifier que la base existe
+        if !std::path::Path::new(&db_path).exists() {
+            return Err("Database not found for symbol".to_string());
+        }
+
+        // Ouvrir connexion
+        let mut conn = match Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(e) => return Err(format!("Failed to open database: {}", e)),
+        };
+
+        // Créer un nouveau client Binance dans ce thread (évite problème runtime Tokio)
+        let market: Market = Binance::new(None, None);
+
+        let mut total_inserted = 0i64;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: i32 = 10; // Limite pour éviter boucle infinie
+
+        // Boucler jusqu'à combler le gap ou atteindre limite
+        loop {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                println!("⚠️ Max iterations atteintes pour {}/{}", symbol, timeframe);
+                break;
+            }
+
+            // Créer retriever et fetch un batch
+            let mut retriever = CandleRetriever::new(
+                &market, &mut conn, &symbol, &timeframe, None, // Pas de date limite
+            );
+
+            match retriever.fetch_one_batch() {
+                Ok((inserted, is_exhausted)) => {
+                    total_inserted += inserted;
+                    println!(
+                        "📦 Batch {}: {} bougies insérées pour {}/{}",
+                        iterations, inserted, symbol, timeframe
+                    );
+
+                    // Arrêter si: aucune insertion OU épuisé
+                    if inserted == 0 || is_exhausted {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Fetch failed at iteration {}: {}", iterations, e));
+                }
+            }
+
+            // Pause courte entre batches
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        Ok((
+            symbol.clone(),
+            timeframe.clone(),
+            total_inserted,
+            iterations,
+        ))
+    })
+    .await;
+
+    match result {
+        Ok(Ok((sym, tf, inserted, iters))) => HttpResponse::Ok().json(serde_json::json!({
+            "status": "success",
+            "symbol": sym,
+            "timeframe": tf,
+            "inserted": inserted,
+            "iterations": iters
+        })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Thread error: {}", e)
+        })),
+    }
+}
+
 /// Trouve une timeframe plus petite disponible
 fn find_smaller_timeframe(conn: &Connection, symbol: &str, target_tf: &str) -> Option<String> {
     let timeframes = vec![
@@ -445,7 +611,11 @@ async fn main() -> std::io::Result<()> {
     println!("📊 Répertoire bases de données: {}", db_dir);
     println!("📁 Fichiers statiques: ./web");
 
-    let app_state = web::Data::new(Mutex::new(AppState { db_dir }));
+    // Initialiser le gestionnaire de bougies temps réel
+    let realtime = Arc::new(RealtimeManager::new());
+    println!("🔌 Gestionnaire WebSocket temps réel initialisé");
+
+    let app_state = web::Data::new(Mutex::new(AppState { db_dir, realtime }));
 
     HttpServer::new(move || {
         let cors = Cors::permissive();
@@ -456,6 +626,9 @@ async fn main() -> std::io::Result<()> {
             .service(health)
             .service(get_pairs)
             .service(get_candles)
+            .service(get_realtime_candles)
+            .service(subscribe_realtime)
+            .service(fetch_gaps)
             .service(Files::new("/", "./web").index_file("index.html"))
     })
     .bind(("127.0.0.1", port))?
