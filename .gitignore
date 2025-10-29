@@ -1,8 +1,8 @@
 /target
 /.idea
+/web/node_modules/
+/web/dist/
 *.db
 *.db-journal
 *.lock
-/web/node_modules/
-/web/dist/
 

@@ -42782,7 +42782,6 @@ extensions.add(browserExt, webworkerExt);
 
 // chart-engine.ts
 var ChartEngine = class _ChartEngine {
-  // Flag pour éviter appels concurrents
   constructor(container, app2, options = {}) {
     this.container = container;
     this.app = app2;
@@ -42797,6 +42796,24 @@ var ChartEngine = class _ChartEngine {
     this.app.stage.addChild(this.bgLayer);
     this.app.stage.addChild(this.mainLayer);
     this.app.stage.addChild(this.overlayLayer);
+    this.volumeGraphics = new Graphics();
+    this.indicatorBgGraphics = new Graphics();
+    this.wicksGraphics = new Graphics();
+    this.bodiesDownGraphics = new Graphics();
+    this.bodiesUpFilledGraphics = new Graphics();
+    this.bodiesUpHollowGraphics = new Graphics();
+    this.bordersGraphics = new Graphics();
+    this.realtimeMarkersGraphics = new Graphics();
+    this.rsiGraphics = new Graphics();
+    this.mainLayer.addChild(this.volumeGraphics);
+    this.mainLayer.addChild(this.indicatorBgGraphics);
+    this.mainLayer.addChild(this.wicksGraphics);
+    this.mainLayer.addChild(this.bodiesDownGraphics);
+    this.mainLayer.addChild(this.bodiesUpFilledGraphics);
+    this.mainLayer.addChild(this.bodiesUpHollowGraphics);
+    this.mainLayer.addChild(this.bordersGraphics);
+    this.mainLayer.addChild(this.realtimeMarkersGraphics);
+    this.mainLayer.addChild(this.rsiGraphics);
     this.overlayCanvas = document.createElement("canvas");
     this.overlayCanvas.style.position = "absolute";
     this.overlayCanvas.style.left = "0";
@@ -42843,9 +42860,12 @@ var ChartEngine = class _ChartEngine {
     this.rsiData = /* @__PURE__ */ new Map();
     this.rsiVisibility = /* @__PURE__ */ new Map();
     this.realtimeCandles = /* @__PURE__ */ new Map();
-    this.realtimePolling = null;
+    this.realtimeWs = null;
     this.realtimeSubscribed = /* @__PURE__ */ new Set();
     this.realtimeUpdating = false;
+    this.renderScheduled = false;
+    this.overlayRenderScheduled = false;
+    this.rafId = null;
     this.legendContainer = document.createElement("div");
     this.legendContainer.style.cssText = "position: absolute; bottom: 45px; left: 80px; z-index: 10; pointer-events: auto;";
     this.container.appendChild(this.legendContainer);
@@ -43039,7 +43059,7 @@ var ChartEngine = class _ChartEngine {
           console.log(`   \u26A0\uFE0F Clamped to minWidth, new view: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
         }
         this.checkAndReloadData();
-        this.render();
+        this.scheduleRender();
       }
     } finally {
       this.state.isProcessingZoom = false;
@@ -43054,7 +43074,7 @@ var ChartEngine = class _ChartEngine {
     } else {
       this.state.showCrosshair = true;
       this.updateCrosshair();
-      this.renderOverlayOnly();
+      this.scheduleOverlayRender();
     }
   }
   handleMouseLeave() {
@@ -43086,7 +43106,7 @@ var ChartEngine = class _ChartEngine {
     const timeShift = -dx * viewWidth / rect.width;
     this.state.viewStart = this.state.dragStartViewStart + timeShift;
     this.state.viewEnd = this.state.dragStartViewEnd + timeShift;
-    this.render();
+    this.scheduleRender();
   }
   handleResize() {
     this.resizeCanvas();
@@ -43286,66 +43306,59 @@ var ChartEngine = class _ChartEngine {
           this.realtimeSubscribed.add(streamKey);
         }
       }
-      if (newStreams.length > 0) {
+      if (!this.realtimeWs || this.realtimeWs.readyState !== WebSocket.OPEN) {
+        this.connectWebSocket();
+      }
+      if (newStreams.length > 0 && this.realtimeWs && this.realtimeWs.readyState === WebSocket.OPEN) {
         console.log(`\u{1F50C} Subscribing to new streams for ${this.state.symbol}: ${newStreams.join(", ")}`);
-        try {
-          const subscribeUrl = `/api/realtime/subscribe?symbol=${this.state.symbol}&timeframes=${newStreams.join(",")}`;
-          const subscribeResponse = await fetch(subscribeUrl, { method: "POST" });
-          if (subscribeResponse.ok) {
-            console.log(`\u2705 Subscribed to ${newStreams.length} new stream(s)`);
-          } else {
-            console.error("Failed to subscribe:", subscribeResponse.statusText);
-          }
-        } catch (error) {
-          console.error("Subscribe error:", error);
-        }
-      } else {
-        console.log(`\u267B\uFE0F  Already subscribed to all required streams`);
+        const subscribeMsg = {
+          action: "subscribe",
+          symbol: this.state.symbol,
+          timeframes: tfArray
+        };
+        this.realtimeWs.send(JSON.stringify(subscribeMsg));
       }
-      if (this.realtimePolling) {
-        clearInterval(this.realtimePolling);
-        this.realtimePolling = null;
-      }
-      const poll = async () => {
-        try {
-          const url = `/api/realtime/candles?symbol=${this.state.symbol}&timeframes=${tfArray.join(",")}`;
-          const response = await fetch(url);
-          if (!response.ok) {
-            console.error("Failed to fetch realtime candles:", response.statusText);
-            return;
-          }
-          const data = await response.json();
-          let needsRender = false;
-          for (const [tf, candle] of Object.entries(data)) {
-            if (candle) {
-              const updated = this.handleRealtimeCandle(tf, candle, candle.is_closed, false);
-              if (updated) needsRender = true;
-            }
-          }
-          if (needsRender) {
-            this.render();
-          }
-        } catch (error) {
-          console.error("Realtime polling error:", error);
-        }
-      };
-      if (newStreams.length > 0) {
-        setTimeout(poll, 500);
-      } else {
-        poll();
-      }
-      this.realtimePolling = window.setInterval(poll, 2e3);
     } finally {
       this.realtimeUpdating = false;
     }
   }
+  connectWebSocket() {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws/realtime`;
+    console.log("\u{1F50C} Connecting to WebSocket:", wsUrl);
+    this.realtimeWs = new WebSocket(wsUrl);
+    this.realtimeWs.onopen = () => {
+      console.log("\u2705 WebSocket connected");
+    };
+    this.realtimeWs.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "candle_update") {
+          this.handleRealtimeCandle(msg.timeframe, msg.candle, msg.candle.is_closed, true);
+        } else if (msg.type === "subscribed") {
+          console.log(`\u2705 Subscribed to ${msg.symbol} [${msg.timeframes.join(", ")}]`);
+        } else if (msg.type === "error") {
+          console.error("\u274C WebSocket error:", msg.message);
+        }
+      } catch (error) {
+        console.error("Failed to parse WebSocket message:", error);
+      }
+    };
+    this.realtimeWs.onerror = (error) => {
+      console.error("\u274C WebSocket error:", error);
+    };
+    this.realtimeWs.onclose = () => {
+      console.log("\u{1F50C} WebSocket closed, will reconnect on next update");
+      this.realtimeWs = null;
+    };
+  }
   stopRealtimeUpdates() {
-    if (this.realtimePolling) {
-      clearInterval(this.realtimePolling);
-      this.realtimePolling = null;
+    if (this.realtimeWs) {
+      this.realtimeWs.close();
+      this.realtimeWs = null;
     }
     this.realtimeCandles.clear();
-    console.log("\u{1F6D1} Stopped realtime polling");
+    console.log("\u{1F6D1} Stopped realtime WebSocket");
   }
   handleRealtimeCandle(timeframe, candle, isComplete, shouldRender = true) {
     this.realtimeCandles.set(timeframe, candle);
@@ -43377,7 +43390,7 @@ var ChartEngine = class _ChartEngine {
         if (updated) {
           this.updateRealtimeRSI();
           if (shouldRender) {
-            this.render();
+            this.scheduleRender();
           }
         }
       }
@@ -43498,7 +43511,7 @@ var ChartEngine = class _ChartEngine {
       checkbox.style.cursor = "pointer";
       checkbox.addEventListener("change", () => {
         this.rsiVisibility.set(tf, checkbox.checked);
-        this.render();
+        this.scheduleRender();
       });
       label.appendChild(checkbox);
       label.appendChild(document.createTextNode(`RSI ${tf}`));
@@ -43603,11 +43616,43 @@ var ChartEngine = class _ChartEngine {
     watermark.alpha = opacity;
     this.bgLayer.addChild(watermark);
   }
+  /**
+   * Planifie un rendu complet via requestAnimationFrame
+   * Évite plusieurs rendus par frame
+   */
+  scheduleRender() {
+    if (this.renderScheduled) return;
+    this.renderScheduled = true;
+    requestAnimationFrame(() => {
+      this.renderScheduled = false;
+      this.render();
+    });
+  }
+  /**
+   * Planifie un rendu d'overlay uniquement via requestAnimationFrame
+   * Plus léger que render() complet
+   */
+  scheduleOverlayRender() {
+    if (this.overlayRenderScheduled) return;
+    this.overlayRenderScheduled = true;
+    requestAnimationFrame(() => {
+      this.overlayRenderScheduled = false;
+      this.renderOverlayOnly();
+    });
+  }
   render() {
     if (this.state.data.length === 0) return;
     const w2 = this.app.screen.width;
     const h2 = this.app.screen.height;
-    this.mainLayer.removeChildren();
+    this.wicksGraphics.clear();
+    this.bodiesUpFilledGraphics.clear();
+    this.bodiesUpHollowGraphics.clear();
+    this.bodiesDownGraphics.clear();
+    this.bordersGraphics.clear();
+    this.realtimeMarkersGraphics.clear();
+    this.volumeGraphics.clear();
+    this.rsiGraphics.clear();
+    this.indicatorBgGraphics.clear();
     this.overlayCtx.clearRect(0, 0, w2, h2);
     const chartX = this.layout.marginLeft;
     const chartY = this.layout.marginTop;
@@ -43654,6 +43699,10 @@ var ChartEngine = class _ChartEngine {
     const minBodyHeight = chartConfig.get("candles.minBodyHeight");
     const realtimeCandle = this.realtimeCandles.get(this.state.currentTimeframe);
     const realtimeCandleTime = realtimeCandle?.time || null;
+    const upColor = parseInt(this.theme.upColor.replace("#", ""), 16);
+    const downColor = parseInt(this.theme.downColor.replace("#", ""), 16);
+    const upBorderColor = parseInt(this.theme.upBorderColor.replace("#", ""), 16);
+    const downBorderColor = parseInt(this.theme.downBorderColor.replace("#", ""), 16);
     visibleCandles.forEach((candle) => {
       const x2 = timeToX(candle.time);
       const yOpen = priceToY(candle.open);
@@ -43661,41 +43710,47 @@ var ChartEngine = class _ChartEngine {
       const yHigh = priceToY(candle.high);
       const yLow = priceToY(candle.low);
       const isUp = candle.close >= candle.open;
-      const color = parseInt(isUp ? this.theme.upColor.replace("#", "") : this.theme.downColor.replace("#", ""), 16);
-      const borderColor = parseInt(isUp ? this.theme.upBorderColor.replace("#", "") : this.theme.downBorderColor.replace("#", ""), 16);
-      const candleGraphics = new Graphics();
+      const color = isUp ? upColor : downColor;
+      const borderColor = isUp ? upBorderColor : downBorderColor;
       const isRealtimeCandle = realtimeCandleTime !== null && candle.time === realtimeCandleTime;
       if (isRealtimeCandle) {
         const markerY = yLow + 8;
-        candleGraphics.lineStyle(2, 8421504, 0.6);
-        candleGraphics.moveTo(x2 - candleWidth / 2, markerY);
-        candleGraphics.lineTo(x2 + candleWidth / 2, markerY);
-        candleGraphics.stroke();
+        this.realtimeMarkersGraphics.lineStyle(2, 8421504, 0.6);
+        this.realtimeMarkersGraphics.moveTo(x2 - candleWidth / 2, markerY);
+        this.realtimeMarkersGraphics.lineTo(x2 + candleWidth / 2, markerY);
       }
-      candleGraphics.lineStyle(wickWidth, color, 1);
-      candleGraphics.moveTo(x2, yHigh);
-      candleGraphics.lineTo(x2, yLow);
-      candleGraphics.stroke();
+      this.wicksGraphics.lineStyle(wickWidth, color, 1);
+      this.wicksGraphics.moveTo(x2, yHigh);
+      this.wicksGraphics.lineTo(x2, yLow);
       const bodyTop = Math.min(yOpen, yClose);
       const bodyHeight = Math.max(minBodyHeight, Math.abs(yClose - yOpen));
       if (isUp && hollowUp) {
         if (borderWidth > 0) {
-          candleGraphics.lineStyle(borderWidth, borderColor, 1);
-          candleGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
-          candleGraphics.stroke();
+          this.bodiesUpHollowGraphics.lineStyle(borderWidth, borderColor, 1);
+          this.bodiesUpHollowGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+        }
+      } else if (isUp) {
+        this.bodiesUpFilledGraphics.beginFill(color);
+        this.bodiesUpFilledGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+        this.bodiesUpFilledGraphics.endFill();
+        if (borderWidth > 0) {
+          this.bordersGraphics.lineStyle(borderWidth, borderColor, 1);
+          this.bordersGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
         }
       } else {
-        candleGraphics.beginFill(color);
-        candleGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
-        candleGraphics.endFill();
+        this.bodiesDownGraphics.beginFill(color);
+        this.bodiesDownGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+        this.bodiesDownGraphics.endFill();
         if (borderWidth > 0) {
-          candleGraphics.lineStyle(borderWidth, borderColor, 1);
-          candleGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
-          candleGraphics.stroke();
+          this.bordersGraphics.lineStyle(borderWidth, borderColor, 1);
+          this.bordersGraphics.drawRect(x2 - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
         }
       }
-      this.mainLayer.addChild(candleGraphics);
     });
+    this.wicksGraphics.stroke();
+    this.realtimeMarkersGraphics.stroke();
+    this.bodiesUpHollowGraphics.stroke();
+    this.bordersGraphics.stroke();
     if (chartConfig.get("indicators.enabled") && this.rsiData.size > 0) {
       console.log(`\u{1F4CA} Rendering ${this.rsiData.size} RSI timeframes`);
       const overlay = chartConfig.get("indicators.rsi.overlay");
@@ -43706,6 +43761,7 @@ var ChartEngine = class _ChartEngine {
         this.renderIndicatorsSeparate(chartX, chartY, chartW, chartH, indicatorH, timeToX);
       }
     }
+    const indicatorY = chartY + chartH + 5;
     this.overlayParams = {
       w: w2,
       h: h2,
@@ -43720,6 +43776,7 @@ var ChartEngine = class _ChartEngine {
       visibleCandles,
       volumeHeight,
       indicatorH,
+      indicatorY,
       timeToX
     };
     this.renderStaticOverlay();
@@ -43730,22 +43787,26 @@ var ChartEngine = class _ChartEngine {
   renderVolume(candles, chartX, chartY, chartW, chartH, volumeHeight, timeToX) {
     if (candles.length === 0) return;
     const maxVolume = Math.max(...candles.map((c2) => c2.volume));
-    const volumeGraphics = new Graphics();
+    const volUpColorStr = chartConfig.get("colors.volumeUpColor");
+    const volDownColorStr = chartConfig.get("colors.volumeDownColor");
+    const matchUp = volUpColorStr.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+    const volUpColor = matchUp ? parseInt(matchUp[1], 16) : 2533018;
+    const volUpAlpha = matchUp && matchUp[2] ? parseInt(matchUp[2], 16) / 255 : 0.5;
+    const matchDown = volDownColorStr.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+    const volDownColor = matchDown ? parseInt(matchDown[1], 16) : 15684432;
+    const volDownAlpha = matchDown && matchDown[2] ? parseInt(matchDown[2], 16) / 255 : 0.5;
+    const barWidth = Math.max(1, chartW / candles.length * 0.8);
     candles.forEach((candle) => {
       const x2 = timeToX(candle.time);
       const height = candle.volume / maxVolume * volumeHeight * 0.95;
       const y2 = chartY + chartH - height;
       const isUp = candle.close >= candle.open;
-      const colorStr = isUp ? chartConfig.get("colors.volumeUpColor") : chartConfig.get("colors.volumeDownColor");
-      const match = colorStr.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
-      const color = match ? parseInt(match[1], 16) : 2533018;
-      const alpha = match && match[2] ? parseInt(match[2], 16) / 255 : 0.5;
-      const barWidth = Math.max(1, chartW / candles.length * 0.8);
-      volumeGraphics.beginFill(color, alpha);
-      volumeGraphics.drawRect(x2 - barWidth / 2, y2, barWidth, height);
-      volumeGraphics.endFill();
+      const color = isUp ? volUpColor : volDownColor;
+      const alpha = isUp ? volUpAlpha : volDownAlpha;
+      this.volumeGraphics.beginFill(color, alpha);
+      this.volumeGraphics.drawRect(x2 - barWidth / 2, y2, barWidth, height);
+      this.volumeGraphics.endFill();
     });
-    this.mainLayer.addChild(volumeGraphics);
   }
   renderIndicatorsOverlay(chartX, chartY, chartW, chartH, timeToX, priceMin, priceMax, priceRange) {
     if (this.rsiData.size === 0) {
@@ -43757,28 +43818,26 @@ var ChartEngine = class _ChartEngine {
       const ratio = value / 100;
       return chartY + chartH * (1 - ratio);
     };
-    const rsiGraphics = new Graphics();
     this.rsiData.forEach((data, tf) => {
       if (!this.rsiVisibility.get(tf)) return;
       const colorStr = this.getRSIColorForTimeframe(tf);
       const color = parseInt(colorStr.replace("#", ""), 16);
-      rsiGraphics.lineStyle(1.5, color, 1);
+      this.rsiGraphics.lineStyle(1.5, color, 1);
       let first = true;
       data.forEach((point) => {
         if (point.time >= this.state.viewStart && point.time <= this.state.viewEnd) {
           const x2 = timeToX(point.time);
           const y2 = rsiToY(point.value);
           if (first) {
-            rsiGraphics.moveTo(x2, y2);
+            this.rsiGraphics.moveTo(x2, y2);
             first = false;
           } else {
-            rsiGraphics.lineTo(x2, y2);
+            this.rsiGraphics.lineTo(x2, y2);
           }
         }
       });
-      rsiGraphics.stroke();
+      this.rsiGraphics.stroke();
     });
-    this.mainLayer.addChild(rsiGraphics);
   }
   renderIndicatorsSeparate(chartX, chartY, chartW, chartH, indicatorH, timeToX) {
     if (this.rsiData.size === 0) {
@@ -43787,41 +43846,31 @@ var ChartEngine = class _ChartEngine {
     }
     console.log(`\u{1F4CA} Rendering RSI (separate mode) for ${this.rsiData.size} timeframes`);
     const indicatorY = chartY + chartH + 5;
-    const indicatorGraphics = new Graphics();
     const bgColor = this.theme.bg === "#ffffff" ? 16382457 : 2434341;
-    indicatorGraphics.beginFill(bgColor);
-    indicatorGraphics.drawRect(chartX, indicatorY, chartW, indicatorH);
-    indicatorGraphics.endFill();
-    const gridColor = parseInt(this.theme.grid.replace("#", ""), 16);
-    indicatorGraphics.lineStyle(1, gridColor, 0.3);
-    [30, 50, 70].forEach((level) => {
-      const y2 = indicatorY + indicatorH * (1 - level / 100);
-      indicatorGraphics.moveTo(chartX, y2);
-      indicatorGraphics.lineTo(chartX + chartW, y2);
-    });
-    indicatorGraphics.stroke();
+    this.indicatorBgGraphics.beginFill(bgColor);
+    this.indicatorBgGraphics.drawRect(chartX, indicatorY, chartW, indicatorH);
+    this.indicatorBgGraphics.endFill();
     const rsiToY = (value) => indicatorY + indicatorH * (1 - value / 100);
     this.rsiData.forEach((data, tf) => {
       if (!this.rsiVisibility.get(tf)) return;
       const colorStr = this.getRSIColorForTimeframe(tf);
       const color = parseInt(colorStr.replace("#", ""), 16);
-      indicatorGraphics.lineStyle(1.5, color, 1);
+      this.rsiGraphics.lineStyle(1.5, color, 1);
       let first = true;
       data.forEach((point) => {
         if (point.time >= this.state.viewStart && point.time <= this.state.viewEnd) {
           const x2 = timeToX(point.time);
           const y2 = rsiToY(point.value);
           if (first) {
-            indicatorGraphics.moveTo(x2, y2);
+            this.rsiGraphics.moveTo(x2, y2);
             first = false;
           } else {
-            indicatorGraphics.lineTo(x2, y2);
+            this.rsiGraphics.lineTo(x2, y2);
           }
         }
       });
-      indicatorGraphics.stroke();
+      this.rsiGraphics.stroke();
     });
-    this.mainLayer.addChild(indicatorGraphics);
   }
   renderLastPriceLine(candles, chartX, chartW, priceToY) {
     const lastCandle = candles[candles.length - 1];
@@ -43945,7 +43994,7 @@ var ChartEngine = class _ChartEngine {
   }
   renderStaticOverlay() {
     if (!this.overlayParams) return;
-    const { w: w2, h: h2, priceMin, priceMax, priceRange, priceToY, chartX, chartY, chartW, chartH, visibleCandles, volumeHeight, indicatorH, timeToX } = this.overlayParams;
+    const { w: w2, h: h2, priceMin, priceMax, priceRange, priceToY, chartX, chartY, chartW, chartH, visibleCandles, volumeHeight, indicatorH, indicatorY, timeToX } = this.overlayParams;
     this.renderPriceAxis(priceMin, priceMax, priceRange, priceToY, chartY, chartH);
     this.renderTimeAxis(w2, h2);
     if (chartConfig.get("lastPrice.enabled") && visibleCandles.length > 0) {
@@ -43957,7 +44006,6 @@ var ChartEngine = class _ChartEngine {
         const candleChartH = chartH - volumeHeight;
         this.renderRSIScaleOverlay(chartX, chartY, chartW, candleChartH, priceMin, priceMax, priceRange);
       } else {
-        const indicatorY = chartY + chartH + 5;
         this.renderRSIScaleSeparate(chartX, indicatorY, indicatorH);
       }
     }
@@ -43969,6 +44017,19 @@ var ChartEngine = class _ChartEngine {
       return chartY + chartH * (1 - ratio);
     };
     this.overlayCtx.save();
+    this.overlayCtx.strokeStyle = "#666666";
+    this.overlayCtx.lineWidth = 1;
+    this.overlayCtx.globalAlpha = 0.25;
+    this.overlayCtx.setLineDash([4, 4]);
+    [30, 50, 70].forEach((level) => {
+      const y2 = rsiToY(level);
+      this.overlayCtx.beginPath();
+      this.overlayCtx.moveTo(chartX, y2);
+      this.overlayCtx.lineTo(chartX + chartW, y2);
+      this.overlayCtx.stroke();
+    });
+    this.overlayCtx.setLineDash([]);
+    this.overlayCtx.globalAlpha = 1;
     this.overlayCtx.fillStyle = this.theme.textLight;
     this.overlayCtx.font = "10px monospace";
     this.overlayCtx.textAlign = "left";
@@ -43979,7 +44040,21 @@ var ChartEngine = class _ChartEngine {
     this.overlayCtx.restore();
   }
   renderRSIScaleSeparate(chartX, indicatorY, indicatorH) {
+    const chartW = this.app.screen.width - this.layout.marginLeft - this.layout.marginRight;
     this.overlayCtx.save();
+    this.overlayCtx.strokeStyle = "#666666";
+    this.overlayCtx.lineWidth = 1;
+    this.overlayCtx.globalAlpha = 0.3;
+    this.overlayCtx.setLineDash([4, 4]);
+    [30, 50, 70].forEach((level) => {
+      const y2 = indicatorY + indicatorH * (1 - level / 100);
+      this.overlayCtx.beginPath();
+      this.overlayCtx.moveTo(chartX, y2);
+      this.overlayCtx.lineTo(chartX + chartW, y2);
+      this.overlayCtx.stroke();
+    });
+    this.overlayCtx.setLineDash([]);
+    this.overlayCtx.globalAlpha = 1;
     this.overlayCtx.fillStyle = this.theme.text;
     this.overlayCtx.font = "10px monospace";
     this.overlayCtx.textAlign = "right";
