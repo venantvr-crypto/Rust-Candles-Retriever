@@ -94,10 +94,6 @@ async function loadPairs(): Promise<void> {
                         ? '1d'
                         : app.availableTimeframes[app.availableTimeframes.length - 1]);
 
-                // Réinitialiser la vue pour charger les derniers points
-                app.chart.state.viewStart = 0;
-                app.chart.state.viewEnd = 0;
-
                 populateTimeframeDropdown();
                 updateTimeframeDisplay();
                 await loadCandles();
@@ -242,16 +238,18 @@ function populateTimeframeDropdown(): void {
         console.log(`🔄 Manual TF change: ${app.currentTimeframe} → ${newTF}`);
 
         if (newTF !== app.currentTimeframe) {
+            // Sauvegarder la plage actuelle avant changement
+            const savedRange = app.chart && app.chart.state.data.length > 0 ? {
+                start: app.chart.state.viewStart,
+                end: app.chart.state.viewEnd
+            } : null;
+
             app.currentTimeframe = newTF;
             if (app.chart) {
                 app.chart.state.currentTimeframe = newTF;
-                // Réinitialiser la vue pour charger les derniers points
-                app.chart.state.viewStart = 0;
-                app.chart.state.viewEnd = 0;
             }
             saveTimeframe();
-            // Passer null pour charger les derniers points
-            await loadCandles(null);
+            await loadCandles(savedRange);
         }
     };
 }
@@ -284,7 +282,7 @@ function initNavigationButtons(): void {
 
     console.log('✅ Navigation buttons initialized');
 
-    navLeft.addEventListener('click', async () => {
+    navLeft.addEventListener('click', () => {
         console.log('◀ Left navigation clicked');
 
         if (app.isLoading) {
@@ -305,28 +303,15 @@ function initNavigationButtons(): void {
         const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
         const panAmount = viewWidth * 0.3; // Pan 30% de la vue
 
-        const newStart = app.chart.state.viewStart - panAmount;
-        const newEnd = app.chart.state.viewEnd - panAmount;
-
         console.log(`← Panning left by ${panAmount}s`);
 
-        // Vérifier si on sort de la plage de données disponibles
-        const earliestData = app.chart.state.data[0]?.time || 0;
-        const margin = viewWidth * 0.5; // Marge de 50% pour pré-charger
+        app.chart.state.viewStart -= panAmount;
+        app.chart.state.viewEnd -= panAmount;
 
-        if (newStart < earliestData + margin) {
-            console.log('📥 Loading more historical data...');
-            // Charger plus de données historiques
-            await loadCandles({ start: Math.floor(newStart - viewWidth), end: Math.ceil(newEnd) });
-        } else {
-            // Assez de données en cache, juste pan
-            app.chart.state.viewStart = newStart;
-            app.chart.state.viewEnd = newEnd;
-            app.chart.render();
-        }
+        app.chart.render();
     });
 
-    navRight.addEventListener('click', async () => {
+    navRight.addEventListener('click', () => {
         console.log('▶ Right navigation clicked');
 
         if (app.isLoading) {
@@ -347,25 +332,12 @@ function initNavigationButtons(): void {
         const viewWidth = app.chart.state.viewEnd - app.chart.state.viewStart;
         const panAmount = viewWidth * 0.3; // Pan 30% de la vue
 
-        const newStart = app.chart.state.viewStart + panAmount;
-        const newEnd = app.chart.state.viewEnd + panAmount;
-
         console.log(`→ Panning right by ${panAmount}s`);
 
-        // Vérifier si on sort de la plage de données disponibles
-        const latestData = app.chart.state.data[app.chart.state.data.length - 1]?.time || 0;
-        const margin = viewWidth * 0.5; // Marge de 50% pour pré-charger
+        app.chart.state.viewStart += panAmount;
+        app.chart.state.viewEnd += panAmount;
 
-        if (newEnd > latestData - margin) {
-            console.log('📥 Loading more recent data...');
-            // Charger plus de données récentes
-            await loadCandles({ start: Math.floor(newStart), end: Math.ceil(newEnd + viewWidth) });
-        } else {
-            // Assez de données en cache, juste pan
-            app.chart.state.viewStart = newStart;
-            app.chart.state.viewEnd = newEnd;
-            app.chart.render();
-        }
+        app.chart.render();
     });
 }
 
