@@ -42859,6 +42859,7 @@ var ChartEngine = class _ChartEngine {
     this.timeframes = [];
     this.rsiData = /* @__PURE__ */ new Map();
     this.rsiVisibility = /* @__PURE__ */ new Map();
+    this.rsiHistoricalData = /* @__PURE__ */ new Map();
     this.realtimeCandles = /* @__PURE__ */ new Map();
     this.realtimeWs = null;
     this.realtimeSubscribed = /* @__PURE__ */ new Set();
@@ -43286,6 +43287,15 @@ var ChartEngine = class _ChartEngine {
     }
     this.realtimeUpdating = true;
     try {
+      const oldSubscriptions = Array.from(this.realtimeSubscribed);
+      for (const streamKey of oldSubscriptions) {
+        const [symbol, _] = streamKey.split(":");
+        if (symbol !== this.state.symbol) {
+          this.realtimeSubscribed.delete(streamKey);
+          console.log(`\u{1F9F9} Removed old subscription: ${streamKey}`);
+        }
+      }
+      this.realtimeCandles.clear();
       const currentIdx = this.timeframes.indexOf(this.state.currentTimeframe);
       const watchedTFs = /* @__PURE__ */ new Set();
       if (currentIdx > 0) {
@@ -43334,6 +43344,10 @@ var ChartEngine = class _ChartEngine {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === "candle_update") {
+          if (msg.symbol !== this.state.symbol) {
+            console.log(`\u23ED\uFE0F  Ignoring candle update for ${msg.symbol} (current: ${this.state.symbol})`);
+            return;
+          }
           this.handleRealtimeCandle(msg.timeframe, msg.candle, msg.candle.is_closed, true);
         } else if (msg.type === "subscribed") {
           console.log(`\u2705 Subscribed to ${msg.symbol} [${msg.timeframes.join(", ")}]`);
