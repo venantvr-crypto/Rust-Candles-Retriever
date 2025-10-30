@@ -42978,6 +42978,17 @@ var ChartEngine = class _ChartEngine {
     this.store = store2;
     console.log(`\u2699\uFE0F Store connected to ChartEngine`);
   }
+  // API pour que le store manipule la vue sans accès direct à state
+  setView(start, end) {
+    this.state.viewStart = start;
+    this.state.viewEnd = end;
+  }
+  getView() {
+    return {
+      start: this.state.viewStart,
+      end: this.state.viewEnd
+    };
+  }
   updateTheme() {
     const themeColors = chartConfig.getThemeColors();
     this.theme = {
@@ -43015,28 +43026,26 @@ var ChartEngine = class _ChartEngine {
   }
   handleWheel(e2) {
     e2.preventDefault();
-    if (this.state.isLoading || this.state.data.length === 0) return;
+    if (this.state.data.length === 0) return;
     if (this.store) {
       const now2 = Date.now();
       if (this.state.isProcessingZoom) return;
       if (now2 - this.state.lastZoomTime < 50) return;
       this.state.isProcessingZoom = true;
       this.state.lastZoomTime = now2;
-      try {
-        const rect = this.overlayCanvas.getBoundingClientRect();
-        const mouseX = e2.clientX - rect.left;
-        const chartWidth = rect.width - this.layout.marginLeft - this.layout.marginRight;
-        const mouseXInChart = mouseX - this.layout.marginLeft;
-        const clampedX = Math.max(0, Math.min(chartWidth, mouseXInChart));
-        const viewWidth = this.state.viewEnd - this.state.viewStart;
-        const pivotRatio = clampedX / chartWidth;
-        const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
-        const zoomFactor = e2.deltaY > 0 ? 1.15 : 0.87;
-        console.log(`\u{1F3AF} Pivot: time=${new Date(pivotTime * 1e3).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}, mouseX=${mouseX.toFixed(0)}`);
-        this.store.updateZoom(zoomFactor, pivotTime, pivotRatio);
-      } finally {
+      const rect = this.overlayCanvas.getBoundingClientRect();
+      const mouseX = e2.clientX - rect.left;
+      const chartWidth = rect.width - this.layout.marginLeft - this.layout.marginRight;
+      const mouseXInChart = mouseX - this.layout.marginLeft;
+      const clampedX = Math.max(0, Math.min(chartWidth, mouseXInChart));
+      const viewWidth = this.state.viewEnd - this.state.viewStart;
+      const pivotRatio = clampedX / chartWidth;
+      const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
+      const zoomFactor = e2.deltaY > 0 ? 1.15 : 0.87;
+      console.log(`\u{1F3AF} Pivot: time=${new Date(pivotTime * 1e3).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}, mouseX=${mouseX.toFixed(0)}`);
+      this.store.updateZoom(zoomFactor, pivotTime, pivotRatio).finally(() => {
         this.state.isProcessingZoom = false;
-      }
+      });
       return;
     }
     const now = Date.now();
@@ -43173,8 +43182,12 @@ var ChartEngine = class _ChartEngine {
     }
     return false;
   }
-  checkAndReloadData() {
-    if (this.state.isLoading || this.state.data.length === 0) return;
+  async checkAndReloadData() {
+    if (this.state.data.length === 0) return;
+    if (this.state.isLoading) {
+      console.log("\u23ED\uFE0F  checkAndReloadData skipped (already loading)");
+      return;
+    }
     const dataStart = this.state.data[0].time;
     const dataEnd = this.state.data[this.state.data.length - 1].time;
     const viewWidth = this.state.viewEnd - this.state.viewStart;
@@ -43190,7 +43203,7 @@ var ChartEngine = class _ChartEngine {
         isSilentReload: true
         // Flag pour garder l'affichage visible pendant le chargement
       };
-      this.loadData(this.state.symbol, this.state.currentTimeframe, savedRange);
+      await this.loadData(this.state.symbol, this.state.currentTimeframe, savedRange);
     }
   }
   updateCrosshair() {
@@ -44381,12 +44394,13 @@ var AppStore = class {
     this.loadingState = "idle";
     this.error = null;
     // --- BUSINESS RULES ---
-    this.minBars = 50;
-    this.maxBars = 150;
+    this.minBars = 80;
+    this.maxBars = 200;
     // --- PRIVATE DEPENDENCIES ---
     this.chart = null;
     this.availableTimeframes = [];
     this.observers = [];
+    this.isTimeframeChanging = false;
     this.dataManager = dataManager2;
   }
   // --- INITIALIZATION ---
@@ -44430,17 +44444,38 @@ var AppStore = class {
   resetVisibleRange() {
     this.visibleRange = { start: 0, end: 0 };
   }
+  getVisibleBarsCount() {
+    if (this.visibleRange.start === 0 || this.visibleRange.end === 0) return 0;
+    const tfSeconds = this.parseTimeframeToSeconds(this.currentTimeframe);
+    if (tfSeconds === 0) return 0;
+    const width = this.visibleRange.end - this.visibleRange.start;
+    return Math.round(width / tfSeconds);
+  }
   async updateZoom(zoomFactor, pivotTime, pivotRatio) {
-    if (this.loadingState === "loading" || !this.currentPair || !this.chart) return;
-    console.log(`[Store] updateZoom: factor=${zoomFactor.toFixed(2)}, pivot=${new Date(pivotTime * 1e3).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}`);
+    if (this.isTimeframeChanging) {
+      console.log(`\u23ED\uFE0F Zoom blocked: TF change in progress`);
+      return;
+    }
+    if (this.loadingState === "loading") {
+      console.log(`\u23ED\uFE0F Zoom blocked: loading in progress`);
+      return;
+    }
+    if (!this.currentPair || !this.chart) return;
     const oldWidth = this.visibleRange.end - this.visibleRange.start;
     const newWidth = oldWidth * zoomFactor;
     const newViewStart = pivotTime - newWidth * pivotRatio;
     const newViewEnd = pivotTime + newWidth * (1 - pivotRatio);
-    this.visibleRange = { start: newViewStart, end: newViewEnd };
     const tfSeconds = this.parseTimeframeToSeconds(this.currentTimeframe);
     if (tfSeconds === 0) return;
     const newVisibleBars = newWidth / tfSeconds;
+    const chartView = this.chart.getView();
+    const chartWidth = chartView.end - chartView.start;
+    const chartBars = chartWidth / tfSeconds;
+    console.log(`[Store] updateZoom: factor=${zoomFactor.toFixed(2)}`);
+    console.log(`   OLD: width=${Math.round(oldWidth)}s, bars=${Math.round(oldWidth / tfSeconds)}`);
+    console.log(`   NEW: width=${Math.round(newWidth)}s, bars=${Math.round(newVisibleBars)} (limits: ${this.minBars}-${this.maxBars})`);
+    console.log(`   CHART: width=${Math.round(chartWidth)}s, bars=${Math.round(chartBars)}`);
+    console.log(`   TF: ${this.currentTimeframe} = ${tfSeconds}s per bar`);
     let didChangeTimeframe = false;
     if (newVisibleBars < this.minBars) {
       const smallerTF = this.getSmallerTimeframe();
@@ -44448,6 +44483,8 @@ var AppStore = class {
         console.log(`[Store] \u{1F50D} Zoom IN: ${Math.round(newVisibleBars)} bars < ${this.minBars}. Switch ${this.currentTimeframe} \u2192 ${smallerTF}`);
         await this.setTimeframeInternal(smallerTF, pivotTime, pivotRatio);
         didChangeTimeframe = true;
+      } else {
+        console.log(`[Store] \u26D4 Zoom IN blocked: no smaller TF available (already at ${this.currentTimeframe})`);
       }
     } else if (newVisibleBars > this.maxBars) {
       const largerTF = this.getLargerTimeframe();
@@ -44455,16 +44492,23 @@ var AppStore = class {
         console.log(`[Store] \u{1F50E} Zoom OUT: ${Math.round(newVisibleBars)} bars > ${this.maxBars}. Switch ${this.currentTimeframe} \u2192 ${largerTF}`);
         await this.setTimeframeInternal(largerTF, pivotTime, pivotRatio);
         didChangeTimeframe = true;
+      } else {
+        console.log(`[Store] \u26D4 Zoom OUT blocked: no larger TF available (already at ${this.currentTimeframe})`);
       }
     }
+    this.visibleRange = { start: newViewStart, end: newViewEnd };
     if (!didChangeTimeframe) {
-      this.chart.state.viewStart = this.visibleRange.start;
-      this.chart.state.viewEnd = this.visibleRange.end;
-      console.log(`\u{1F4D0} Updated chart view: ${new Date(this.chart.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.chart.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+      this.chart.setView(this.visibleRange.start, this.visibleRange.end);
+      console.log(`\u{1F4D0} Updated chart view: ${new Date(this.visibleRange.start * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.visibleRange.end * 1e3).toISOString().substring(0, 16)}`);
       await this.chart.checkAndReloadData();
+      const chartView2 = this.chart.getView();
+      if (chartView2.start !== this.visibleRange.start || chartView2.end !== this.visibleRange.end) {
+        console.log(`\u26A0\uFE0F Chart adjusted view during reload: store will resync`);
+        this.visibleRange.start = chartView2.start;
+        this.visibleRange.end = chartView2.end;
+      }
       this.chart.render();
-      this.visibleRange.start = this.chart.state.viewStart;
-      this.visibleRange.end = this.chart.state.viewEnd;
+      this.notifyObservers();
     }
   }
   async updatePan(timeShift) {
@@ -44491,11 +44535,9 @@ var AppStore = class {
   // --- INTERNAL LOGIC ---
   async setTimeframeInternal(newTimeframe, pivotTime, pivotRatio) {
     if (newTimeframe === this.currentTimeframe || !this.currentPair || !this.chart) return;
+    this.isTimeframeChanging = true;
     const oldTF = this.currentTimeframe;
-    this.currentTimeframe = newTimeframe;
-    localStorage.setItem("selectedTimeframe", newTimeframe);
-    console.log(`[Store] TF change: ${oldTF} \u2192 ${newTimeframe}, pivot=${pivotTime ? new Date(pivotTime * 1e3).toISOString().substring(0, 16) : "N/A"}, ratio=${pivotRatio?.toFixed(3)}`);
-    this.notifyObservers();
+    console.log(`[Store] TF change START: ${oldTF} \u2192 ${newTimeframe}, pivot=${pivotTime ? new Date(pivotTime * 1e3).toISOString().substring(0, 16) : "N/A"}, ratio=${pivotRatio?.toFixed(3)}`);
     const savedRange = {
       start: this.visibleRange.start,
       end: this.visibleRange.end,
@@ -44505,9 +44547,18 @@ var AppStore = class {
       isSilentReload: true
       // Garder l'affichage actuel pendant le changement de TF
     };
-    await this.chart.loadData(this.currentPair, this.currentTimeframe, savedRange);
-    this.visibleRange.start = this.chart.state.viewStart;
-    this.visibleRange.end = this.chart.state.viewEnd;
+    try {
+      await this.chart.loadData(this.currentPair, newTimeframe, savedRange);
+      this.currentTimeframe = newTimeframe;
+      localStorage.setItem("selectedTimeframe", newTimeframe);
+      const chartView = this.chart.getView();
+      this.visibleRange.start = chartView.start;
+      this.visibleRange.end = chartView.end;
+      console.log(`[Store] TF change DONE: ${oldTF} \u2192 ${newTimeframe}`);
+      this.notifyObservers();
+    } finally {
+      this.isTimeframeChanging = false;
+    }
   }
   async loadDataForCurrentView(isFullReset = false) {
     if (!this.currentPair || !this.chart) return;
@@ -44627,20 +44678,36 @@ var DataManager = class {
    */
   async prefetchAdjacent(symbol, timeframe, currentRange) {
     const rangeWidth = currentRange.end - currentRange.start;
+    const now = Math.floor(Date.now() / 1e3);
     const prevPromise = this.fetch(
       symbol,
       timeframe,
       Math.floor(currentRange.start - rangeWidth),
       Math.floor(currentRange.start)
-    );
-    const nextPromise = this.fetch(
-      symbol,
-      timeframe,
-      Math.ceil(currentRange.end),
-      Math.ceil(currentRange.end + rangeWidth)
-    );
+    ).catch((err) => {
+      console.log(`[DataManager] Prefetch previous chunk failed (OK, might be no data): ${err.message}`);
+      return [];
+    });
+    const nextStart = Math.ceil(currentRange.end);
+    const nextEnd = Math.ceil(currentRange.end + rangeWidth);
+    let nextPromise;
+    if (nextStart > now) {
+      console.log(`[DataManager] Skipping future prefetch for ${symbol} ${timeframe}`);
+      nextPromise = Promise.resolve([]);
+    } else {
+      nextPromise = this.fetch(
+        symbol,
+        timeframe,
+        nextStart,
+        Math.min(nextEnd, now)
+        // Cap au présent
+      ).catch((err) => {
+        console.log(`[DataManager] Prefetch next chunk failed (OK, might be no data): ${err.message}`);
+        return [];
+      });
+    }
     await Promise.all([prevPromise, nextPromise]);
-    console.log(`[DataManager] Prefetched adjacent data for ${symbol} ${timeframe}`);
+    console.log(`[DataManager] Prefetch completed for ${symbol} ${timeframe}`);
   }
   /**
    * Clear cache for a specific pair (used when switching pairs)
@@ -44684,8 +44751,12 @@ var DataManager = class {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
     const candles = await response.json();
-    if (!Array.isArray(candles) || candles.length === 0) {
-      throw new Error("No data received");
+    if (!Array.isArray(candles)) {
+      throw new Error("Invalid data format received");
+    }
+    if (candles.length === 0) {
+      console.log(`[DataManager] No candles in range for ${symbol} ${timeframe}`);
+      return [];
     }
     console.log(`[DataManager] Fetched ${candles.length} candles`);
     return candles;
@@ -44728,9 +44799,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   store.subscribe(() => {
     updateTimeframeDisplay();
     updateLoadingIndicator();
-    if (chart && chart.state.data) {
-      updateCandleCount(chart.state.data.length);
-    }
+    updateCandleCount(store.getVisibleBarsCount());
   });
 });
 async function initChart() {
