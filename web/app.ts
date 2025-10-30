@@ -1,47 +1,52 @@
-import {Candle, PairInfo, AppState} from './types';
+import {Candle, PairInfo} from './types';
 import {ChartEngine} from './chart-engine';
 import {chartConfig} from './config';
+import {AppStore} from './store';
+import {dataManager} from './data-manager';
 
 /**
- * Application de trading avec ChartEngine
+ * Application de trading avec ChartEngine - REFACTORED avec Centralized State
+ * Architecture: AppStore (single source of truth) → ChartEngine (pure renderer)
  */
 
 const API_BASE = '/api';
 
-// État global
-const app: AppState = {
-    chart: null,
-    currentPair: null,
-    currentTimeframe: '1d',
-    isLoading: false,
-    availableTimeframes: []
-};
+// Centralized store
+const store = new AppStore(dataManager);
+
+// Chart reference
+let chart: ChartEngine | null = null;
 
 // Initialisation
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log('🚀 Initializing Chart Engine v2...');
+    console.log('🚀 Initializing Chart Engine v2 (Refactored Architecture)...');
     initSettingsPanel();
     await initChart();
     await loadPairs();
+
+    // Subscribe to store changes for UI updates
+    store.subscribe(() => {
+        updateTimeframeDisplay();
+        updateLoadingIndicator();
+        // Update candle count from chart if available
+        if (chart && chart.state.data) {
+            updateCandleCount(chart.state.data.length);
+        }
+    });
 });
 
 async function initChart(): Promise<void> {
     const container = document.getElementById('chart')!;
 
-    app.chart = await ChartEngine.create(container, {
+    chart = await ChartEngine.create(container, {
         onLoadData: async (symbol, timeframe, start, end) => {
-            return await fetchCandles(symbol, timeframe, start, end);
+            // DataManager handles all fetching through store
+            return await dataManager.fetch(symbol, timeframe, start, end);
         },
 
         onTimeframeChange: async (newTimeframe, savedRange) => {
-            if (app.isLoading) {
-                console.log('⚠️ Already loading, ignoring TF change');
-                return;
-            }
-
-            app.currentTimeframe = newTimeframe;
-            updateTimeframeDisplay();
-            await loadCandles(savedRange);
+            // Delegate to store
+            await store.setTimeframe(newTimeframe);
         },
 
         onError: (error) => {
@@ -50,7 +55,11 @@ async function initChart(): Promise<void> {
         }
     });
 
-    console.log('✅ Chart engine initialized');
+    // Register chart with store (bidirectional)
+    store.setChart(chart);
+    chart.setStore(store);
+
+    console.log('✅ Chart engine initialized with store connection');
 }
 
 async function loadPairs(): Promise<void> {
@@ -61,7 +70,7 @@ async function loadPairs(): Promise<void> {
         const selector = document.getElementById('pairSelector') as HTMLSelectElement;
         selector.innerHTML = '<option value="">Select a pair...</option>';
 
-        // Store pairs data for later use
+        // Store pairs data
         const pairsData: Record<string, string[]> = {};
         pairs.forEach(pair => {
             pairsData[pair.symbol] = pair.timeframes;
@@ -71,43 +80,25 @@ async function loadPairs(): Promise<void> {
             selector.appendChild(option);
         });
 
-        // Event listener
+        // Event listener for pair change
         selector.addEventListener('change', async (e: any) => {
-            app.currentPair = e.target.value;
-            if (app.currentPair) {
-                // Sauvegarder dans localStorage
-                localStorage.setItem('selectedPair', app.currentPair);
-
-                // Récupérer les timeframes disponibles pour cette paire
-                app.availableTimeframes = pairsData[app.currentPair] || [];
-                app.chart.setTimeframes(app.availableTimeframes);
-
-                // Trouver le meilleur timeframe par défaut (1d si dispo, sinon le dernier)
-                app.currentTimeframe = app.availableTimeframes.includes('1d')
-                    ? '1d'
-                    : app.availableTimeframes[app.availableTimeframes.length - 1];
-
-                updateTimeframeDisplay();
-                await loadCandles();
+            const newPair = e.target.value;
+            if (newPair) {
+                const timeframes = pairsData[newPair] || [];
+                console.log(`[App] Timeframes from API for ${newPair}: ${timeframes.join(', ')}`);
+                await store.setPair(newPair, timeframes);
             }
         });
 
-        // Charger la paire sauvegardée depuis localStorage
+        // Load saved pair or first pair
         const savedPair = localStorage.getItem('selectedPair');
         let initialPair = savedPair && pairsData[savedPair] ? savedPair : (pairs.length > 0 ? pairs[0].symbol : null);
 
-        // Auto-select
         if (initialPair) {
             selector.value = initialPair;
-            app.currentPair = initialPair;
-            app.availableTimeframes = pairsData[app.currentPair] || [];
-            app.chart.setTimeframes(app.availableTimeframes);
-
-            app.currentTimeframe = app.availableTimeframes.includes('1d')
-                ? '1d'
-                : app.availableTimeframes[app.availableTimeframes.length - 1];
-
-            await loadCandles();
+            const timeframes = pairsData[initialPair] || [];
+            console.log(`[App] Initial timeframes from API for ${initialPair}: ${timeframes.join(', ')}`);
+            await store.setPair(initialPair, timeframes);
             console.log(`✅ Loaded ${pairs.length} pairs (selected: ${initialPair})`);
         }
     } catch (error) {
@@ -116,64 +107,34 @@ async function loadPairs(): Promise<void> {
     }
 }
 
-async function loadCandles(savedRange: any = null): Promise<void> {
-    if (!app.currentPair) return;
+// --- UI HELPERS ---
 
-    if (app.isLoading) {
-        console.log('⚠️ Already loading, skipping...');
-        return;
+function updateLoadingIndicator(): void {
+    const loadingEl = document.getElementById('loading');
+    if (loadingEl) {
+        loadingEl.style.display = store.loadingState === 'loading' ? 'flex' : 'none';
     }
 
-    app.isLoading = true;
-    showLoading(true);
-    updateStatus('Loading...');
-
-    try {
-        await app.chart.loadData(app.currentPair, app.currentTimeframe, savedRange);
-        updateStatus('Ready');
-    } catch (error) {
-        console.error('Error loading candles:', error);
-        updateStatus(`Error: ${error.message}`, true);
-    } finally {
-        app.isLoading = false;
-        showLoading(false);
+    const statusEl = document.getElementById('status');
+    if (statusEl) {
+        switch (store.loadingState) {
+            case 'loading':
+                statusEl.textContent = 'Loading...';
+                statusEl.style.color = '';
+                break;
+            case 'success':
+                statusEl.textContent = 'Ready';
+                statusEl.style.color = '';
+                break;
+            case 'error':
+                statusEl.textContent = store.error ? `Error: ${store.error.message}` : 'Error';
+                statusEl.style.color = '#ef5350';
+                break;
+            default:
+                statusEl.textContent = 'Ready';
+                statusEl.style.color = '';
+        }
     }
-}
-
-async function fetchCandles(symbol: string, timeframe: string, start: number | null = null, end: number | null = null): Promise<Candle[]> {
-    // Construire l'URL avec les paramètres de plage si fournis
-    let url = `${API_BASE}/candles?symbol=${symbol}&timeframe=${timeframe}&limit=5000`;
-
-    if (start !== null) {
-        url += `&start=${start}`;
-    }
-
-    if (end !== null) {
-        url += `&end=${end}`;
-    }
-
-    console.log(`📡 Fetching ${symbol} ${timeframe} (${start ? new Date(start * 1000).toISOString().substring(0, 16) : 'auto'} → ${end ? new Date(end * 1000).toISOString().substring(0, 16) : 'auto'})...`);
-
-    const response = await fetch(url);
-
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const candles = await response.json();
-
-    if (!Array.isArray(candles) || candles.length === 0) {
-        throw new Error('No data received');
-    }
-
-    updateCandleCount(candles.length);
-    return candles;
-}
-
-// UI Helpers
-function showLoading(show: boolean): void {
-    const el = document.getElementById('loading');
-    if (el) el.style.display = show ? 'flex' : 'none';
 }
 
 function updateStatus(message: string, isError: boolean = false): void {
@@ -190,16 +151,19 @@ function updateCandleCount(count: number): void {
 }
 
 function updateTimeframeDisplay(): void {
-    const el = document.getElementById('currentTimeframe');
-    if (el) el.textContent = app.currentTimeframe;
+    const badge = document.getElementById('currentTimeframe');
+    if (badge) badge.textContent = store.currentTimeframe.toUpperCase();
 }
 
-// Settings Panel Management
+// --- SETTINGS PANEL ---
+
 function initSettingsPanel(): void {
     const panel = document.getElementById('settingsPanel');
     const toggle = document.getElementById('settingsToggle');
     const close = document.getElementById('closeSettings');
     const reset = document.getElementById('resetConfig');
+
+    if (!panel || !toggle || !close || !reset) return;
 
     // Toggle panel
     toggle.addEventListener('click', () => {
@@ -262,20 +226,20 @@ function initSettingsPanel(): void {
 function loadSettingsToUI(): void {
     (document.getElementById('hollowUp') as HTMLInputElement).checked = chartConfig.get('candles.hollowUp');
     (document.getElementById('borderWidth') as HTMLInputElement).value = chartConfig.get('candles.borderWidth');
-    document.getElementById('borderWidthValue').textContent = chartConfig.get('candles.borderWidth');
+    document.getElementById('borderWidthValue')!.textContent = chartConfig.get('candles.borderWidth');
     (document.getElementById('wickWidth') as HTMLInputElement).value = chartConfig.get('candles.wickWidth');
-    document.getElementById('wickWidthValue').textContent = chartConfig.get('candles.wickWidth');
+    document.getElementById('wickWidthValue')!.textContent = chartConfig.get('candles.wickWidth');
 
     (document.getElementById('volumeEnabled') as HTMLInputElement).checked = chartConfig.get('volume.enabled');
     (document.getElementById('volumeHeight') as HTMLInputElement).value = chartConfig.get('volume.heightPercent');
-    document.getElementById('volumeHeightValue').textContent = chartConfig.get('volume.heightPercent');
+    document.getElementById('volumeHeightValue')!.textContent = chartConfig.get('volume.heightPercent');
 
     (document.getElementById('watermarkEnabled') as HTMLInputElement).checked = chartConfig.get('watermark.enabled');
     (document.getElementById('watermarkOpacity') as HTMLInputElement).value = chartConfig.get('watermark.opacity');
-    document.getElementById('watermarkOpacityValue').textContent = chartConfig.get('watermark.opacity');
+    document.getElementById('watermarkOpacityValue')!.textContent = chartConfig.get('watermark.opacity');
 
     (document.getElementById('gridHorizontal') as HTMLInputElement).value = chartConfig.get('grid.horizontal');
-    document.getElementById('gridHorizontalValue').textContent = chartConfig.get('grid.horizontal');
+    document.getElementById('gridHorizontalValue')!.textContent = chartConfig.get('grid.horizontal');
     (document.getElementById('gridOpacity') as HTMLInputElement).value = String(chartConfig.get('grid.opacity') * 100);
     document.getElementById('gridOpacityValue')!.textContent = String(Math.round(chartConfig.get('grid.opacity') * 100));
 
@@ -286,14 +250,15 @@ function loadSettingsToUI(): void {
 
     (document.getElementById('indicatorsEnabled') as HTMLInputElement).checked = chartConfig.get('indicators.enabled');
     (document.getElementById('indicatorsHeight') as HTMLInputElement).value = chartConfig.get('indicators.heightPercent');
-    document.getElementById('indicatorsHeightValue').textContent = chartConfig.get('indicators.heightPercent');
+    document.getElementById('indicatorsHeightValue')!.textContent = chartConfig.get('indicators.heightPercent');
     (document.getElementById('rsiOverlay') as HTMLInputElement).checked = chartConfig.get('indicators.rsi.overlay');
 
     (document.getElementById('theme') as HTMLInputElement).value = chartConfig.get('colors.theme');
 }
 
 function bindSetting(elementId: string, configPath: string, type: string, valueDisplayId: string | null = null, transform: ((v: number) => number) | null = null, callback: ((v: any) => void) | null = null): void {
-    const element = document.getElementById(elementId)!;
+    const element = document.getElementById(elementId);
+    if (!element) return;
 
     element.addEventListener(type === 'checkbox' ? 'change' : 'input', (e: any) => {
         let value: any;
@@ -303,7 +268,8 @@ function bindSetting(elementId: string, configPath: string, type: string, valueD
         } else if (type === 'range') {
             value = parseFloat(e.target.value);
             if (valueDisplayId) {
-                document.getElementById(valueDisplayId).textContent = e.target.value;
+                const displayEl = document.getElementById(valueDisplayId);
+                if (displayEl) displayEl.textContent = e.target.value;
             }
             if (transform) value = transform(value);
         } else {
@@ -333,10 +299,10 @@ function applyThemeChange(theme: 'light' | 'dark'): void {
 }
 
 async function refreshChart(): Promise<void> {
-    if (app.chart && app.currentPair) {
-        app.chart.updateTheme();
-        await app.chart.loadIndicatorData();
-        app.chart.renderBackground();
-        app.chart.render();
+    if (chart && store.currentPair) {
+        chart.updateTheme();
+        await chart.loadIndicatorData();
+        chart.renderBackground();
+        chart.render();
     }
 }
