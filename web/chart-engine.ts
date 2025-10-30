@@ -30,6 +30,7 @@ export class ChartEngine {
     realtimeWs: WebSocket | null; // Connexion WebSocket temps réel
     realtimeSubscribed: Set<string>; // Streams déjà souscrits (symbol:tf)
     realtimeUpdating: boolean; // Flag pour éviter appels concurrents
+    store: any; // Reference to AppStore for zoom handling
 
     // Graphics réutilisables pour performance (batching)
     wicksGraphics: PIXI.Graphics;
@@ -292,10 +293,16 @@ export class ChartEngine {
     }
 
     setTimeframes(timeframes) {
-        this.timeframes = timeframes.sort((a, b) =>
+        // Create a copy and sort to avoid mutating the original
+        this.timeframes = [...timeframes].sort((a, b) =>
             this.parseTimeframeToSeconds(a) - this.parseTimeframeToSeconds(b)
         );
-        console.log(`⚙️ Timeframes configured: ${this.timeframes.join(', ')}`);
+        console.log(`⚙️ Timeframes configured (sorted): ${this.timeframes.join(', ')}`);
+    }
+
+    setStore(store: any): void {
+        this.store = store;
+        console.log(`⚙️ Store connected to ChartEngine`);
     }
 
     updateTheme() {
@@ -356,14 +363,48 @@ export class ChartEngine {
         e.preventDefault();
         if (this.state.isLoading || this.state.data.length === 0) return;
 
-        // Throttle: ignorer si on est déjà en train de traiter un zoom
+        // Delegate to store if available (new architecture)
+        if (this.store) {
+            // Throttle
+            const now = Date.now();
+            if (this.state.isProcessingZoom) return;
+            if (now - this.state.lastZoomTime < 50) return;
+
+            this.state.isProcessingZoom = true;
+            this.state.lastZoomTime = now;
+
+            try {
+                const rect = this.overlayCanvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+
+                // Calculate pivot
+                const chartWidth = rect.width - this.layout.marginLeft - this.layout.marginRight;
+                const mouseXInChart = mouseX - this.layout.marginLeft;
+                const clampedX = Math.max(0, Math.min(chartWidth, mouseXInChart));
+                const viewWidth = this.state.viewEnd - this.state.viewStart;
+                const pivotRatio = clampedX / chartWidth;
+                const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
+
+                // Zoom factor
+                const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
+
+                console.log(`🎯 Pivot: time=${new Date(pivotTime * 1000).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}, mouseX=${mouseX.toFixed(0)}`);
+
+                // Delegate to store (passer le pivotRatio calculé ici!)
+                this.store.updateZoom(zoomFactor, pivotTime, pivotRatio);
+            } finally {
+                this.state.isProcessingZoom = false;
+            }
+            return;
+        }
+
+        // Legacy path (old architecture without store)
         const now = Date.now();
         if (this.state.isProcessingZoom) {
             console.log('⏭️  Skipping zoom (already processing)');
             return;
         }
 
-        // Throttle: au minimum 50ms entre chaque zoom (20 fps max)
         if (now - this.state.lastZoomTime < 50) {
             console.log('⏭️  Skipping zoom (too fast)');
             return;
@@ -376,73 +417,42 @@ export class ChartEngine {
             const rect = this.overlayCanvas.getBoundingClientRect();
             const mouseX = e.clientX - rect.left;
 
-            // Calculer position dans la zone du chart (sans marges)
             const chartWidth = rect.width - this.layout.marginLeft - this.layout.marginRight;
             const mouseXInChart = mouseX - this.layout.marginLeft;
-
-            // Clamp dans la zone du chart
             const clampedX = Math.max(0, Math.min(chartWidth, mouseXInChart));
 
-            // Timestamp pivot sous la souris (dans la zone du chart)
             const viewWidth = this.state.viewEnd - this.state.viewStart;
             const pivotRatio = clampedX / chartWidth;
             const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
 
-            const pivotDateBefore = new Date(pivotTime * 1000).toISOString().substring(0, 16);
-            console.log(`🎯 BEFORE zoom: Pivot at x=${clampedX.toFixed(0)}px, ratio=${pivotRatio.toFixed(3)}, time=${pivotDateBefore}`);
-            console.log(`   View: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)} (${Math.round(viewWidth / this.parseTimeframeToSeconds(this.state.currentTimeframe))} bars)`);
-
-            // Facteur de zoom
             const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
             let newWidth = viewWidth * zoomFactor;
 
-            // Vérifier contrainte AVANT de modifier la vue
             const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
-            const minWidth = 50 * tfSeconds; // 50 bars minimum
+            const minWidth = 50 * tfSeconds;
 
-            // Si on essaie de zoomer en dessous du minimum ET qu'on est sur la TF la plus basse
             const currentIndex = this.timeframes.indexOf(this.state.currentTimeframe);
             if (newWidth < minWidth && currentIndex === 0 && zoomFactor < 1) {
-                // Bloquer le zoom IN, ne rien faire
-                console.log(`⛔ Can't zoom more on ${this.state.currentTimeframe} (minimum ${Math.round(viewWidth / tfSeconds)} bars)`);
+                console.log(`⛔ Can't zoom more on ${this.state.currentTimeframe}`);
                 return;
             }
 
-            // Recalculer bornes en gardant le pivot à la même position relative
             this.state.viewStart = pivotTime - newWidth * pivotRatio;
             this.state.viewEnd = pivotTime + newWidth * (1 - pivotRatio);
 
-            console.log(`   AFTER zoom: View: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)} (${Math.round(newWidth / this.parseTimeframeToSeconds(this.state.currentTimeframe))} bars)`);
-
-            // Vérifier que le pivot est toujours au même endroit
-            const newViewWidth = this.state.viewEnd - this.state.viewStart;
-            const verifyPivotTime = this.state.viewStart + pivotRatio * newViewWidth;
-            const pivotDateAfter = new Date(verifyPivotTime * 1000).toISOString().substring(0, 16);
-            console.log(`   ✓ Verify pivot: ${pivotDateAfter} (should be ${pivotDateBefore})`);
-
-            // Vérifier si changement de TF nécessaire, en passant le pivot pour le préserver
             const didChange = this.checkAndSwitchTimeframe(pivotTime, pivotRatio);
 
             if (!didChange) {
-                // Pas de changement de TF
-                // Vérifier qu'on n'est pas en dessous du minimum
                 const currentWidth = this.state.viewEnd - this.state.viewStart;
                 if (currentWidth < minWidth) {
-                    // Clamp à minWidth en gardant le pivot
                     this.state.viewStart = pivotTime - minWidth * pivotRatio;
                     this.state.viewEnd = pivotTime + minWidth * (1 - pivotRatio);
-                    console.log(`   ⚠️ Clamped to minWidth, new view: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
                 }
 
-                // Vérifier si on doit recharger plus de données
                 this.checkAndReloadData();
-
-                // Planifier render via RAF
                 this.scheduleRender();
             }
-            // Si changement de TF, le callback va déclencher loadData qui va render
         } finally {
-            // Toujours relâcher le flag
             this.state.isProcessingZoom = false;
         }
     }
@@ -572,8 +582,15 @@ export class ChartEngine {
             console.log(`   Data range: ${new Date(dataStart * 1000).toISOString().substring(0, 16)} → ${new Date(dataEnd * 1000).toISOString().substring(0, 16)}`);
             console.log(`   View range: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
 
+            // IMPORTANT: Sauvegarder la vue actuelle pour éviter le repositionnement à droite
+            const savedRange = {
+                start: this.state.viewStart,
+                end: this.state.viewEnd,
+                isSilentReload: true  // Flag pour garder l'affichage visible pendant le chargement
+            };
+
             // Recharger avec la vue actuelle (loadData ajoutera automatiquement les marges)
-            this.loadData(this.state.symbol, this.state.currentTimeframe);
+            this.loadData(this.state.symbol, this.state.currentTimeframe, savedRange);
         }
     }
 
@@ -626,8 +643,15 @@ export class ChartEngine {
         this.state.currentTimeframe = timeframe;
         this.state.isLoading = true;
 
-        // Afficher loading
-        this.renderLoading();
+        // Détecter si on doit garder l'affichage actuel (silent reload)
+        const isSilentReload = savedRange && savedRange.isSilentReload === true;
+
+        // Afficher loading SEULEMENT si ce n'est pas un silent reload
+        if (!isSilentReload) {
+            this.renderLoading();
+        } else {
+            console.log(`⚡ Silent reload - keeping current display visible during load`);
+        }
 
         try {
             // Calculer la plage de dates à charger (élargie pour permettre le pan)
@@ -676,9 +700,11 @@ export class ChartEngine {
             // Initialiser ou restaurer vue
             if (savedRange === null) {
                 // Premier chargement
+                console.log(`🎯 fitToData() - positioning view at end`);
                 this.fitToData();
             } else {
                 // Restaurer la MÊME plage temporelle exacte
+                console.log(`🎯 restoreViewFromRange() - preserving view position`);
                 this.restoreViewFromRange(savedRange);
             }
 
@@ -1274,20 +1300,39 @@ export class ChartEngine {
     }
 
     restoreViewFromRange(savedRange) {
-        // Garder EXACTEMENT la même fenêtre temporelle
-        // Les bougies changent mais pas les coordonnées temporelles
-        this.state.viewStart = savedRange.start;
-        this.state.viewEnd = savedRange.end;
-
         const oldTFSeconds = savedRange.oldTFSeconds || this.parseTimeframeToSeconds(this.state.currentTimeframe);
         const newTFSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
-        const savedWidth = savedRange.end - savedRange.start;
 
-        const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
-        const newBarsCount = Math.round(savedWidth / newTFSeconds);
+        // Si on a un pivot (zoom avec changement de TF), recalculer la vue autour du pivot
+        if (savedRange.pivotTime !== null && savedRange.pivotTime !== undefined &&
+            savedRange.pivotRatio !== null && savedRange.pivotRatio !== undefined) {
 
-        console.log(`📊 Timeframe change: ${oldBarsCount} bars → ${newBarsCount} bars`);
-        console.log(`   Fixed window: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
+            const savedWidth = savedRange.end - savedRange.start;
+            const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
+            const newBarsCount = Math.round(savedWidth / newTFSeconds);
+
+            // Calculer nouvelle largeur en secondes (même nombre de bougies visuelles)
+            const newWidth = savedWidth * (newTFSeconds / oldTFSeconds);
+
+            // Recalculer vue autour du pivot
+            this.state.viewStart = savedRange.pivotTime - newWidth * savedRange.pivotRatio;
+            this.state.viewEnd = savedRange.pivotTime + newWidth * (1 - savedRange.pivotRatio);
+
+            console.log(`📊 TF change with PIVOT: ${oldBarsCount} bars → ${newBarsCount} bars`);
+            console.log(`   Pivot at: ${new Date(savedRange.pivotTime * 1000).toISOString().substring(0, 16)} (ratio=${savedRange.pivotRatio.toFixed(3)})`);
+            console.log(`   New window: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
+        } else {
+            // Pas de pivot - garder EXACTEMENT la même fenêtre temporelle
+            this.state.viewStart = savedRange.start;
+            this.state.viewEnd = savedRange.end;
+
+            const savedWidth = savedRange.end - savedRange.start;
+            const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
+            const newBarsCount = Math.round(savedWidth / newTFSeconds);
+
+            console.log(`📊 TF change without pivot: ${oldBarsCount} bars → ${newBarsCount} bars`);
+            console.log(`   Fixed window: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
+        }
     }
 
     renderBackground() {

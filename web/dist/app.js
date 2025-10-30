@@ -42782,9 +42782,9 @@ extensions.add(browserExt, webworkerExt);
 
 // chart-engine.ts
 var ChartEngine = class _ChartEngine {
-  constructor(container, app2, options = {}) {
+  constructor(container, app, options = {}) {
     this.container = container;
-    this.app = app2;
+    this.app = app;
     const pixiCanvas = this.app.canvas;
     pixiCanvas.style.position = "absolute";
     pixiCanvas.style.left = "0";
@@ -42916,8 +42916,8 @@ var ChartEngine = class _ChartEngine {
     this.renderBackground();
   }
   static async create(container, options = {}) {
-    const app2 = new Application();
-    await app2.init({
+    const app = new Application();
+    await app.init({
       width: container.clientWidth,
       height: container.clientHeight,
       backgroundColor: 16777215,
@@ -42925,7 +42925,7 @@ var ChartEngine = class _ChartEngine {
       resolution: window.devicePixelRatio || 1,
       autoDensity: true
     });
-    return new _ChartEngine(container, app2, options);
+    return new _ChartEngine(container, app, options);
   }
   parseTimeframeToSeconds(tf) {
     const match = tf.match(/^(\d+)([mhd])$/);
@@ -42969,10 +42969,14 @@ var ChartEngine = class _ChartEngine {
     return rsi;
   }
   setTimeframes(timeframes) {
-    this.timeframes = timeframes.sort(
+    this.timeframes = [...timeframes].sort(
       (a2, b2) => this.parseTimeframeToSeconds(a2) - this.parseTimeframeToSeconds(b2)
     );
-    console.log(`\u2699\uFE0F Timeframes configured: ${this.timeframes.join(", ")}`);
+    console.log(`\u2699\uFE0F Timeframes configured (sorted): ${this.timeframes.join(", ")}`);
+  }
+  setStore(store2) {
+    this.store = store2;
+    console.log(`\u2699\uFE0F Store connected to ChartEngine`);
   }
   updateTheme() {
     const themeColors = chartConfig.getThemeColors();
@@ -43012,6 +43016,29 @@ var ChartEngine = class _ChartEngine {
   handleWheel(e2) {
     e2.preventDefault();
     if (this.state.isLoading || this.state.data.length === 0) return;
+    if (this.store) {
+      const now2 = Date.now();
+      if (this.state.isProcessingZoom) return;
+      if (now2 - this.state.lastZoomTime < 50) return;
+      this.state.isProcessingZoom = true;
+      this.state.lastZoomTime = now2;
+      try {
+        const rect = this.overlayCanvas.getBoundingClientRect();
+        const mouseX = e2.clientX - rect.left;
+        const chartWidth = rect.width - this.layout.marginLeft - this.layout.marginRight;
+        const mouseXInChart = mouseX - this.layout.marginLeft;
+        const clampedX = Math.max(0, Math.min(chartWidth, mouseXInChart));
+        const viewWidth = this.state.viewEnd - this.state.viewStart;
+        const pivotRatio = clampedX / chartWidth;
+        const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
+        const zoomFactor = e2.deltaY > 0 ? 1.15 : 0.87;
+        console.log(`\u{1F3AF} Pivot: time=${new Date(pivotTime * 1e3).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}, mouseX=${mouseX.toFixed(0)}`);
+        this.store.updateZoom(zoomFactor, pivotTime, pivotRatio);
+      } finally {
+        this.state.isProcessingZoom = false;
+      }
+      return;
+    }
     const now = Date.now();
     if (this.state.isProcessingZoom) {
       console.log("\u23ED\uFE0F  Skipping zoom (already processing)");
@@ -43032,32 +43059,23 @@ var ChartEngine = class _ChartEngine {
       const viewWidth = this.state.viewEnd - this.state.viewStart;
       const pivotRatio = clampedX / chartWidth;
       const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
-      const pivotDateBefore = new Date(pivotTime * 1e3).toISOString().substring(0, 16);
-      console.log(`\u{1F3AF} BEFORE zoom: Pivot at x=${clampedX.toFixed(0)}px, ratio=${pivotRatio.toFixed(3)}, time=${pivotDateBefore}`);
-      console.log(`   View: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)} (${Math.round(viewWidth / this.parseTimeframeToSeconds(this.state.currentTimeframe))} bars)`);
       const zoomFactor = e2.deltaY > 0 ? 1.15 : 0.87;
       let newWidth = viewWidth * zoomFactor;
       const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
       const minWidth = 50 * tfSeconds;
       const currentIndex = this.timeframes.indexOf(this.state.currentTimeframe);
       if (newWidth < minWidth && currentIndex === 0 && zoomFactor < 1) {
-        console.log(`\u26D4 Can't zoom more on ${this.state.currentTimeframe} (minimum ${Math.round(viewWidth / tfSeconds)} bars)`);
+        console.log(`\u26D4 Can't zoom more on ${this.state.currentTimeframe}`);
         return;
       }
       this.state.viewStart = pivotTime - newWidth * pivotRatio;
       this.state.viewEnd = pivotTime + newWidth * (1 - pivotRatio);
-      console.log(`   AFTER zoom: View: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)} (${Math.round(newWidth / this.parseTimeframeToSeconds(this.state.currentTimeframe))} bars)`);
-      const newViewWidth = this.state.viewEnd - this.state.viewStart;
-      const verifyPivotTime = this.state.viewStart + pivotRatio * newViewWidth;
-      const pivotDateAfter = new Date(verifyPivotTime * 1e3).toISOString().substring(0, 16);
-      console.log(`   \u2713 Verify pivot: ${pivotDateAfter} (should be ${pivotDateBefore})`);
       const didChange = this.checkAndSwitchTimeframe(pivotTime, pivotRatio);
       if (!didChange) {
         const currentWidth = this.state.viewEnd - this.state.viewStart;
         if (currentWidth < minWidth) {
           this.state.viewStart = pivotTime - minWidth * pivotRatio;
           this.state.viewEnd = pivotTime + minWidth * (1 - pivotRatio);
-          console.log(`   \u26A0\uFE0F Clamped to minWidth, new view: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
         }
         this.checkAndReloadData();
         this.scheduleRender();
@@ -43166,7 +43184,13 @@ var ChartEngine = class _ChartEngine {
       console.log(`\u{1F504} Reloading data - view approaching data boundaries`);
       console.log(`   Data range: ${new Date(dataStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(dataEnd * 1e3).toISOString().substring(0, 16)}`);
       console.log(`   View range: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
-      this.loadData(this.state.symbol, this.state.currentTimeframe);
+      const savedRange = {
+        start: this.state.viewStart,
+        end: this.state.viewEnd,
+        isSilentReload: true
+        // Flag pour garder l'affichage visible pendant le chargement
+      };
+      this.loadData(this.state.symbol, this.state.currentTimeframe, savedRange);
     }
   }
   updateCrosshair() {
@@ -43203,7 +43227,12 @@ var ChartEngine = class _ChartEngine {
     this.state.symbol = symbol;
     this.state.currentTimeframe = timeframe;
     this.state.isLoading = true;
-    this.renderLoading();
+    const isSilentReload = savedRange && savedRange.isSilentReload === true;
+    if (!isSilentReload) {
+      this.renderLoading();
+    } else {
+      console.log(`\u26A1 Silent reload - keeping current display visible during load`);
+    }
     try {
       let fetchStart = null;
       let fetchEnd = null;
@@ -43235,8 +43264,10 @@ var ChartEngine = class _ChartEngine {
       this.state.priceMin = Math.min(...prices);
       this.state.priceMax = Math.max(...prices);
       if (savedRange === null) {
+        console.log(`\u{1F3AF} fitToData() - positioning view at end`);
         this.fitToData();
       } else {
+        console.log(`\u{1F3AF} restoreViewFromRange() - preserving view position`);
         this.restoreViewFromRange(savedRange);
       }
       await this.loadIndicatorData();
@@ -43641,15 +43672,27 @@ var ChartEngine = class _ChartEngine {
     this.state.viewStart = this.state.viewEnd - barsToShow * tfSeconds;
   }
   restoreViewFromRange(savedRange) {
-    this.state.viewStart = savedRange.start;
-    this.state.viewEnd = savedRange.end;
     const oldTFSeconds = savedRange.oldTFSeconds || this.parseTimeframeToSeconds(this.state.currentTimeframe);
     const newTFSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
-    const savedWidth = savedRange.end - savedRange.start;
-    const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
-    const newBarsCount = Math.round(savedWidth / newTFSeconds);
-    console.log(`\u{1F4CA} Timeframe change: ${oldBarsCount} bars \u2192 ${newBarsCount} bars`);
-    console.log(`   Fixed window: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+    if (savedRange.pivotTime !== null && savedRange.pivotTime !== void 0 && savedRange.pivotRatio !== null && savedRange.pivotRatio !== void 0) {
+      const savedWidth = savedRange.end - savedRange.start;
+      const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
+      const newBarsCount = Math.round(savedWidth / newTFSeconds);
+      const newWidth = savedWidth * (newTFSeconds / oldTFSeconds);
+      this.state.viewStart = savedRange.pivotTime - newWidth * savedRange.pivotRatio;
+      this.state.viewEnd = savedRange.pivotTime + newWidth * (1 - savedRange.pivotRatio);
+      console.log(`\u{1F4CA} TF change with PIVOT: ${oldBarsCount} bars \u2192 ${newBarsCount} bars`);
+      console.log(`   Pivot at: ${new Date(savedRange.pivotTime * 1e3).toISOString().substring(0, 16)} (ratio=${savedRange.pivotRatio.toFixed(3)})`);
+      console.log(`   New window: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+    } else {
+      this.state.viewStart = savedRange.start;
+      this.state.viewEnd = savedRange.end;
+      const savedWidth = savedRange.end - savedRange.start;
+      const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
+      const newBarsCount = Math.round(savedWidth / newTFSeconds);
+      console.log(`\u{1F4CA} TF change without pivot: ${oldBarsCount} bars \u2192 ${newBarsCount} bars`);
+      console.log(`   Fixed window: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+    }
   }
   renderBackground() {
     const w2 = this.app.screen.width;
@@ -44328,42 +44371,385 @@ var ChartEngine = class _ChartEngine {
   }
 };
 
+// store.ts
+var AppStore = class {
+  constructor(dataManager2) {
+    // --- PUBLIC STATE ---
+    this.currentPair = null;
+    this.currentTimeframe = "1d";
+    this.visibleRange = { start: 0, end: 0 };
+    this.loadingState = "idle";
+    this.error = null;
+    // --- BUSINESS RULES ---
+    this.minBars = 50;
+    this.maxBars = 150;
+    // --- PRIVATE DEPENDENCIES ---
+    this.chart = null;
+    this.availableTimeframes = [];
+    this.observers = [];
+    this.dataManager = dataManager2;
+  }
+  // --- INITIALIZATION ---
+  setChart(chart2) {
+    this.chart = chart2;
+  }
+  // --- PUBLIC API ---
+  async setPair(pair, timeframes) {
+    if (pair === this.currentPair) return;
+    const oldPair = this.currentPair;
+    this.currentPair = pair;
+    this.availableTimeframes = this.sortTimeframes(timeframes);
+    console.log(`[Store] Timeframes for ${pair} (sorted): ${this.availableTimeframes.join(", ")}`);
+    localStorage.setItem("selectedPair", pair);
+    const savedTF = localStorage.getItem("selectedTimeframe");
+    this.currentTimeframe = savedTF && this.availableTimeframes.includes(savedTF) ? savedTF : this.availableTimeframes.includes("1d") ? "1d" : this.availableTimeframes[this.availableTimeframes.length - 1];
+    if (this.chart) {
+      this.chart.setTimeframes(this.availableTimeframes);
+    }
+    console.log(`[Store] Changed pair: ${oldPair} \u2192 ${pair}, TF: ${this.currentTimeframe}`);
+    this.notifyObservers();
+    await this.loadDataForCurrentView(true);
+  }
+  setAvailableTimeframes(timeframes) {
+    this.availableTimeframes = this.sortTimeframes(timeframes);
+  }
+  async setTimeframe(newTimeframe) {
+    if (newTimeframe === this.currentTimeframe) return;
+    const oldTF = this.currentTimeframe;
+    this.currentTimeframe = newTimeframe;
+    localStorage.setItem("selectedTimeframe", newTimeframe);
+    console.log(`[Store] Changed timeframe: ${oldTF} \u2192 ${newTimeframe}`);
+    this.notifyObservers();
+    await this.loadDataForCurrentView(true);
+  }
+  setLoadingState(state, error) {
+    this.loadingState = state;
+    this.error = error || null;
+    this.notifyObservers();
+  }
+  resetVisibleRange() {
+    this.visibleRange = { start: 0, end: 0 };
+  }
+  async updateZoom(zoomFactor, pivotTime, pivotRatio) {
+    if (this.loadingState === "loading" || !this.currentPair || !this.chart) return;
+    console.log(`[Store] updateZoom: factor=${zoomFactor.toFixed(2)}, pivot=${new Date(pivotTime * 1e3).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}`);
+    const oldWidth = this.visibleRange.end - this.visibleRange.start;
+    const newWidth = oldWidth * zoomFactor;
+    const newViewStart = pivotTime - newWidth * pivotRatio;
+    const newViewEnd = pivotTime + newWidth * (1 - pivotRatio);
+    this.visibleRange = { start: newViewStart, end: newViewEnd };
+    const tfSeconds = this.parseTimeframeToSeconds(this.currentTimeframe);
+    if (tfSeconds === 0) return;
+    const newVisibleBars = newWidth / tfSeconds;
+    let didChangeTimeframe = false;
+    if (newVisibleBars < this.minBars) {
+      const smallerTF = this.getSmallerTimeframe();
+      if (smallerTF) {
+        console.log(`[Store] \u{1F50D} Zoom IN: ${Math.round(newVisibleBars)} bars < ${this.minBars}. Switch ${this.currentTimeframe} \u2192 ${smallerTF}`);
+        await this.setTimeframeInternal(smallerTF, pivotTime, pivotRatio);
+        didChangeTimeframe = true;
+      }
+    } else if (newVisibleBars > this.maxBars) {
+      const largerTF = this.getLargerTimeframe();
+      if (largerTF) {
+        console.log(`[Store] \u{1F50E} Zoom OUT: ${Math.round(newVisibleBars)} bars > ${this.maxBars}. Switch ${this.currentTimeframe} \u2192 ${largerTF}`);
+        await this.setTimeframeInternal(largerTF, pivotTime, pivotRatio);
+        didChangeTimeframe = true;
+      }
+    }
+    if (!didChangeTimeframe) {
+      this.chart.state.viewStart = this.visibleRange.start;
+      this.chart.state.viewEnd = this.visibleRange.end;
+      console.log(`\u{1F4D0} Updated chart view: ${new Date(this.chart.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.chart.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+      await this.chart.checkAndReloadData();
+      this.chart.render();
+      this.visibleRange.start = this.chart.state.viewStart;
+      this.visibleRange.end = this.chart.state.viewEnd;
+    }
+  }
+  async updatePan(timeShift) {
+    if (this.loadingState === "loading") return;
+    this.visibleRange = {
+      start: this.visibleRange.start + timeShift,
+      end: this.visibleRange.end + timeShift
+    };
+    await this.loadDataForCurrentView(false);
+    if (this.chart) {
+      this.chart.render();
+    }
+  }
+  // --- OBSERVERS ---
+  subscribe(callback) {
+    this.observers.push(callback);
+    return () => {
+      this.observers = this.observers.filter((cb) => cb !== callback);
+    };
+  }
+  notifyObservers() {
+    this.observers.forEach((callback) => callback());
+  }
+  // --- INTERNAL LOGIC ---
+  async setTimeframeInternal(newTimeframe, pivotTime, pivotRatio) {
+    if (newTimeframe === this.currentTimeframe || !this.currentPair || !this.chart) return;
+    const oldTF = this.currentTimeframe;
+    this.currentTimeframe = newTimeframe;
+    localStorage.setItem("selectedTimeframe", newTimeframe);
+    console.log(`[Store] TF change: ${oldTF} \u2192 ${newTimeframe}, pivot=${pivotTime ? new Date(pivotTime * 1e3).toISOString().substring(0, 16) : "N/A"}, ratio=${pivotRatio?.toFixed(3)}`);
+    this.notifyObservers();
+    const savedRange = {
+      start: this.visibleRange.start,
+      end: this.visibleRange.end,
+      oldTFSeconds: this.parseTimeframeToSeconds(oldTF),
+      pivotTime: pivotTime || null,
+      pivotRatio: pivotRatio || null,
+      isSilentReload: true
+      // Garder l'affichage actuel pendant le changement de TF
+    };
+    await this.chart.loadData(this.currentPair, this.currentTimeframe, savedRange);
+    this.visibleRange.start = this.chart.state.viewStart;
+    this.visibleRange.end = this.chart.state.viewEnd;
+  }
+  async loadDataForCurrentView(isFullReset = false) {
+    if (!this.currentPair || !this.chart) return;
+    this.loadingState = "loading";
+    this.notifyObservers();
+    let rangeToLoad = this.visibleRange;
+    if (isFullReset || rangeToLoad.start === 0) {
+      const now = Math.floor(Date.now() / 1e3);
+      const tfSeconds = this.parseTimeframeToSeconds(this.currentTimeframe);
+      const defaultWidth = tfSeconds * 100;
+      rangeToLoad = { start: now - defaultWidth, end: now + tfSeconds * 10 };
+    }
+    try {
+      if (isFullReset || this.visibleRange.start === 0) {
+        this.visibleRange = rangeToLoad;
+      }
+      const savedRange = {
+        start: this.visibleRange.start,
+        end: this.visibleRange.end,
+        oldTFSeconds: null,
+        pivotTime: null,
+        pivotRatio: null
+      };
+      await this.chart.loadData(this.currentPair, this.currentTimeframe, savedRange);
+      if (rangeToLoad.start !== 0 && rangeToLoad.end !== 0) {
+        this.dataManager.prefetchAdjacent(
+          this.currentPair,
+          this.currentTimeframe,
+          { start: rangeToLoad.start, end: rangeToLoad.end }
+        ).catch((e2) => console.warn("Prefetch failed:", e2));
+      }
+      this.loadingState = "success";
+    } catch (e2) {
+      this.loadingState = "error";
+      this.error = e2;
+      console.error("[Store] Load error:", e2);
+    }
+    this.notifyObservers();
+  }
+  // --- HELPERS ---
+  getSmallerTimeframe() {
+    const currentIndex = this.availableTimeframes.indexOf(this.currentTimeframe);
+    const result = currentIndex > 0 ? this.availableTimeframes[currentIndex - 1] : null;
+    console.log(`[Store] getSmallerTimeframe: current=${this.currentTimeframe} (idx=${currentIndex}), smaller=${result}, all=[${this.availableTimeframes.join(", ")}]`);
+    return result;
+  }
+  getLargerTimeframe() {
+    const currentIndex = this.availableTimeframes.indexOf(this.currentTimeframe);
+    const result = currentIndex !== -1 && currentIndex < this.availableTimeframes.length - 1 ? this.availableTimeframes[currentIndex + 1] : null;
+    console.log(`[Store] getLargerTimeframe: current=${this.currentTimeframe} (idx=${currentIndex}), larger=${result}, all=[${this.availableTimeframes.join(", ")}]`);
+    return result;
+  }
+  parseTimeframeToSeconds(tf) {
+    const match = tf.match(/^(\d+)([mhd])$/);
+    if (!match) return 86400;
+    const value = parseInt(match[1]);
+    const unit = match[2];
+    switch (unit) {
+      case "m":
+        return value * 60;
+      case "h":
+        return value * 3600;
+      case "d":
+        return value * 86400;
+      default:
+        return 86400;
+    }
+  }
+  sortTimeframes(timeframes) {
+    return [...timeframes].sort(
+      (a2, b2) => this.parseTimeframeToSeconds(a2) - this.parseTimeframeToSeconds(b2)
+    );
+  }
+};
+
+// data-manager.ts
+var DataManager = class {
+  constructor() {
+    this.cache = /* @__PURE__ */ new Map();
+    this.inflightRequests = /* @__PURE__ */ new Map();
+    this.maxCacheSize = 100;
+    this.cacheTTL = 5 * 60 * 1e3;
+    // 5 minutes
+    this.apiBase = "/api";
+  }
+  // --- PUBLIC API ---
+  async fetch(symbol, timeframe, start, end) {
+    const key = this.makeKey(symbol, timeframe, start, end);
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
+      console.log(`[DataManager] Cache HIT: ${key}`);
+      cached.accessCount++;
+      return cached.data;
+    }
+    if (this.inflightRequests.has(key)) {
+      console.log(`[DataManager] Deduplicating request: ${key}`);
+      return this.inflightRequests.get(key);
+    }
+    console.log(`[DataManager] Cache MISS: ${key}`);
+    const promise2 = this.fetchFromAPI(symbol, timeframe, start, end);
+    this.inflightRequests.set(key, promise2);
+    try {
+      const data = await promise2;
+      this.cache.set(key, {
+        data,
+        timestamp: Date.now(),
+        accessCount: 1
+      });
+      this.evictLRU();
+      return data;
+    } finally {
+      this.inflightRequests.delete(key);
+    }
+  }
+  /**
+   * Proactive prefetching of adjacent data
+   */
+  async prefetchAdjacent(symbol, timeframe, currentRange) {
+    const rangeWidth = currentRange.end - currentRange.start;
+    const prevPromise = this.fetch(
+      symbol,
+      timeframe,
+      Math.floor(currentRange.start - rangeWidth),
+      Math.floor(currentRange.start)
+    );
+    const nextPromise = this.fetch(
+      symbol,
+      timeframe,
+      Math.ceil(currentRange.end),
+      Math.ceil(currentRange.end + rangeWidth)
+    );
+    await Promise.all([prevPromise, nextPromise]);
+    console.log(`[DataManager] Prefetched adjacent data for ${symbol} ${timeframe}`);
+  }
+  /**
+   * Clear cache for a specific pair (used when switching pairs)
+   */
+  clearPair(symbol) {
+    const keysToDelete = [];
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(`${symbol}:`)) {
+        keysToDelete.push(key);
+      }
+    }
+    keysToDelete.forEach((key) => this.cache.delete(key));
+    console.log(`[DataManager] Cleared cache for ${symbol} (${keysToDelete.length} entries)`);
+  }
+  /**
+   * Get cache statistics
+   */
+  getStats() {
+    const entries = Array.from(this.cache.values());
+    const totalSize = entries.reduce((sum, e2) => sum + e2.data.length, 0);
+    const avgAccessCount = entries.reduce((sum, e2) => sum + e2.accessCount, 0) / entries.length;
+    return {
+      cacheSize: this.cache.size,
+      inflightRequests: this.inflightRequests.size,
+      totalCandles: totalSize,
+      avgAccessCount: avgAccessCount || 0
+    };
+  }
+  // --- PRIVATE METHODS ---
+  async fetchFromAPI(symbol, timeframe, start, end) {
+    let url = `${this.apiBase}/candles?symbol=${symbol}&timeframe=${timeframe}&limit=5000`;
+    if (start !== null) {
+      url += `&start=${start}`;
+    }
+    if (end !== null) {
+      url += `&end=${end}`;
+    }
+    console.log(`[DataManager] Fetching ${symbol} ${timeframe} (${start ? new Date(start * 1e3).toISOString().substring(0, 16) : "auto"} \u2192 ${end ? new Date(end * 1e3).toISOString().substring(0, 16) : "auto"})`);
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    const candles = await response.json();
+    if (!Array.isArray(candles) || candles.length === 0) {
+      throw new Error("No data received");
+    }
+    console.log(`[DataManager] Fetched ${candles.length} candles`);
+    return candles;
+  }
+  makeKey(symbol, timeframe, start, end) {
+    return `${symbol}:${timeframe}:${start || "null"}:${end || "null"}`;
+  }
+  /**
+   * Evict least recently used entries when cache is full
+   */
+  evictLRU() {
+    if (this.cache.size <= this.maxCacheSize) return;
+    let minAccessCount = Infinity;
+    let oldestKey = null;
+    let oldestTimestamp = Infinity;
+    for (const [key, entry] of this.cache.entries()) {
+      if (entry.accessCount < minAccessCount || entry.accessCount === minAccessCount && entry.timestamp < oldestTimestamp) {
+        minAccessCount = entry.accessCount;
+        oldestKey = key;
+        oldestTimestamp = entry.timestamp;
+      }
+    }
+    if (oldestKey) {
+      this.cache.delete(oldestKey);
+      console.log(`[DataManager] Evicted LRU entry: ${oldestKey} (access count: ${minAccessCount})`);
+    }
+  }
+};
+var dataManager = new DataManager();
+
 // app.ts
 var API_BASE = "/api";
-var app = {
-  chart: null,
-  currentPair: null,
-  currentTimeframe: "1d",
-  isLoading: false,
-  availableTimeframes: []
-};
+var store = new AppStore(dataManager);
+var chart = null;
 document.addEventListener("DOMContentLoaded", async () => {
-  console.log("\u{1F680} Initializing Chart Engine v2...");
+  console.log("\u{1F680} Initializing Chart Engine v2 (Refactored Architecture)...");
   initSettingsPanel();
   await initChart();
   await loadPairs();
+  store.subscribe(() => {
+    updateTimeframeDisplay();
+    updateLoadingIndicator();
+    if (chart && chart.state.data) {
+      updateCandleCount(chart.state.data.length);
+    }
+  });
 });
 async function initChart() {
   const container = document.getElementById("chart");
-  app.chart = await ChartEngine.create(container, {
+  chart = await ChartEngine.create(container, {
     onLoadData: async (symbol, timeframe, start, end) => {
-      return await fetchCandles(symbol, timeframe, start, end);
+      return await dataManager.fetch(symbol, timeframe, start, end);
     },
     onTimeframeChange: async (newTimeframe, savedRange) => {
-      if (app.isLoading) {
-        console.log("\u26A0\uFE0F Already loading, ignoring TF change");
-        return;
-      }
-      app.currentTimeframe = newTimeframe;
-      updateTimeframeDisplay();
-      await loadCandles(savedRange);
+      await store.setTimeframe(newTimeframe);
     },
     onError: (error) => {
       console.error("Chart error:", error);
       updateStatus(`Error: ${error.message}`, true);
     }
   });
-  console.log("\u2705 Chart engine initialized");
+  store.setChart(chart);
+  chart.setStore(store);
+  console.log("\u2705 Chart engine initialized with store connection");
 }
 async function loadPairs() {
   try {
@@ -44380,25 +44766,20 @@ async function loadPairs() {
       selector.appendChild(option);
     });
     selector.addEventListener("change", async (e2) => {
-      app.currentPair = e2.target.value;
-      if (app.currentPair) {
-        localStorage.setItem("selectedPair", app.currentPair);
-        app.availableTimeframes = pairsData[app.currentPair] || [];
-        app.chart.setTimeframes(app.availableTimeframes);
-        app.currentTimeframe = app.availableTimeframes.includes("1d") ? "1d" : app.availableTimeframes[app.availableTimeframes.length - 1];
-        updateTimeframeDisplay();
-        await loadCandles();
+      const newPair = e2.target.value;
+      if (newPair) {
+        const timeframes = pairsData[newPair] || [];
+        console.log(`[App] Timeframes from API for ${newPair}: ${timeframes.join(", ")}`);
+        await store.setPair(newPair, timeframes);
       }
     });
     const savedPair = localStorage.getItem("selectedPair");
     let initialPair = savedPair && pairsData[savedPair] ? savedPair : pairs.length > 0 ? pairs[0].symbol : null;
     if (initialPair) {
       selector.value = initialPair;
-      app.currentPair = initialPair;
-      app.availableTimeframes = pairsData[app.currentPair] || [];
-      app.chart.setTimeframes(app.availableTimeframes);
-      app.currentTimeframe = app.availableTimeframes.includes("1d") ? "1d" : app.availableTimeframes[app.availableTimeframes.length - 1];
-      await loadCandles();
+      const timeframes = pairsData[initialPair] || [];
+      console.log(`[App] Initial timeframes from API for ${initialPair}: ${timeframes.join(", ")}`);
+      await store.setPair(initialPair, timeframes);
       console.log(`\u2705 Loaded ${pairs.length} pairs (selected: ${initialPair})`);
     }
   } catch (error) {
@@ -44406,49 +44787,31 @@ async function loadPairs() {
     updateStatus("Error loading pairs", true);
   }
 }
-async function loadCandles(savedRange = null) {
-  if (!app.currentPair) return;
-  if (app.isLoading) {
-    console.log("\u26A0\uFE0F Already loading, skipping...");
-    return;
+function updateLoadingIndicator() {
+  const loadingEl = document.getElementById("loading");
+  if (loadingEl) {
+    loadingEl.style.display = store.loadingState === "loading" ? "flex" : "none";
   }
-  app.isLoading = true;
-  showLoading(true);
-  updateStatus("Loading...");
-  try {
-    await app.chart.loadData(app.currentPair, app.currentTimeframe, savedRange);
-    updateStatus("Ready");
-  } catch (error) {
-    console.error("Error loading candles:", error);
-    updateStatus(`Error: ${error.message}`, true);
-  } finally {
-    app.isLoading = false;
-    showLoading(false);
+  const statusEl = document.getElementById("status");
+  if (statusEl) {
+    switch (store.loadingState) {
+      case "loading":
+        statusEl.textContent = "Loading...";
+        statusEl.style.color = "";
+        break;
+      case "success":
+        statusEl.textContent = "Ready";
+        statusEl.style.color = "";
+        break;
+      case "error":
+        statusEl.textContent = store.error ? `Error: ${store.error.message}` : "Error";
+        statusEl.style.color = "#ef5350";
+        break;
+      default:
+        statusEl.textContent = "Ready";
+        statusEl.style.color = "";
+    }
   }
-}
-async function fetchCandles(symbol, timeframe, start = null, end = null) {
-  let url = `${API_BASE}/candles?symbol=${symbol}&timeframe=${timeframe}&limit=5000`;
-  if (start !== null) {
-    url += `&start=${start}`;
-  }
-  if (end !== null) {
-    url += `&end=${end}`;
-  }
-  console.log(`\u{1F4E1} Fetching ${symbol} ${timeframe} (${start ? new Date(start * 1e3).toISOString().substring(0, 16) : "auto"} \u2192 ${end ? new Date(end * 1e3).toISOString().substring(0, 16) : "auto"})...`);
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  }
-  const candles = await response.json();
-  if (!Array.isArray(candles) || candles.length === 0) {
-    throw new Error("No data received");
-  }
-  updateCandleCount(candles.length);
-  return candles;
-}
-function showLoading(show) {
-  const el = document.getElementById("loading");
-  if (el) el.style.display = show ? "flex" : "none";
 }
 function updateStatus(message, isError = false) {
   const el = document.getElementById("status");
@@ -44462,14 +44825,15 @@ function updateCandleCount(count2) {
   if (el) el.textContent = count2.toLocaleString();
 }
 function updateTimeframeDisplay() {
-  const el = document.getElementById("currentTimeframe");
-  if (el) el.textContent = app.currentTimeframe;
+  const badge = document.getElementById("currentTimeframe");
+  if (badge) badge.textContent = store.currentTimeframe.toUpperCase();
 }
 function initSettingsPanel() {
   const panel = document.getElementById("settingsPanel");
   const toggle = document.getElementById("settingsToggle");
   const close = document.getElementById("closeSettings");
   const reset = document.getElementById("resetConfig");
+  if (!panel || !toggle || !close || !reset) return;
   toggle.addEventListener("click", () => {
     panel.classList.toggle("open");
     toggle.classList.toggle("hidden");
@@ -44537,6 +44901,7 @@ function loadSettingsToUI() {
 }
 function bindSetting(elementId, configPath, type, valueDisplayId = null, transform = null, callback = null) {
   const element = document.getElementById(elementId);
+  if (!element) return;
   element.addEventListener(type === "checkbox" ? "change" : "input", (e2) => {
     let value;
     if (type === "checkbox") {
@@ -44544,7 +44909,8 @@ function bindSetting(elementId, configPath, type, valueDisplayId = null, transfo
     } else if (type === "range") {
       value = parseFloat(e2.target.value);
       if (valueDisplayId) {
-        document.getElementById(valueDisplayId).textContent = e2.target.value;
+        const displayEl = document.getElementById(valueDisplayId);
+        if (displayEl) displayEl.textContent = e2.target.value;
       }
       if (transform) value = transform(value);
     } else {
@@ -44565,11 +44931,11 @@ function applyThemeChange(theme) {
   refreshChart();
 }
 async function refreshChart() {
-  if (app.chart && app.currentPair) {
-    app.chart.updateTheme();
-    await app.chart.loadIndicatorData();
-    app.chart.renderBackground();
-    app.chart.render();
+  if (chart && store.currentPair) {
+    chart.updateTheme();
+    await chart.loadIndicatorData();
+    chart.renderBackground();
+    chart.render();
   }
 }
 /*! Bundled license information:
