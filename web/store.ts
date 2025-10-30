@@ -16,7 +16,7 @@ export class AppStore {
 
     // --- BUSINESS RULES ---
     public minBars: number = 80;
-    public maxBars: number = 200;
+    public maxBars: number = 240;  // Augmenté pour éviter les oscillations (3d→1d = 3x bougies)
 
     // --- PRIVATE DEPENDENCIES ---
     private chart: ChartEngine | null = null;

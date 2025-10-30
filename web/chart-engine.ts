@@ -174,7 +174,7 @@ export class ChartEngine {
 
             // Contraintes de zoom
             minBars: 80,
-            maxBars: 200,
+            maxBars: 240,  // Augmenté pour éviter les oscillations (3d→1d = 3x bougies)
 
             // Prix
             priceMin: 0,
@@ -1324,20 +1324,23 @@ export class ChartEngine {
         if (savedRange.pivotTime !== null && savedRange.pivotTime !== undefined &&
             savedRange.pivotRatio !== null && savedRange.pivotRatio !== undefined) {
 
+            // GARDER la même fenêtre temporelle (en secondes)!
+            // Si on était sur 10 jours en 1d (10 bougies), on reste sur 10 jours en 12h (20 bougies)
             const savedWidth = savedRange.end - savedRange.start;
             const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
             const newBarsCount = Math.round(savedWidth / newTFSeconds);
 
-            // Calculer nouvelle largeur en secondes (même nombre de bougies visuelles)
-            const newWidth = savedWidth * (newTFSeconds / oldTFSeconds);
+            // NE PAS multiplier - garder la même largeur temporelle!
+            const newWidth = savedWidth;
 
-            // Recalculer vue autour du pivot
+            // Recalculer vue autour du pivot avec la MÊME fenêtre temporelle
             this.state.viewStart = savedRange.pivotTime - newWidth * savedRange.pivotRatio;
             this.state.viewEnd = savedRange.pivotTime + newWidth * (1 - savedRange.pivotRatio);
 
-            console.log(`📊 TF change with PIVOT: ${oldBarsCount} bars → ${newBarsCount} bars`);
+            console.log(`📊 TF change with PIVOT (FIXED window): ${oldBarsCount} bars (${oldTFSeconds}s) → ${newBarsCount} bars (${newTFSeconds}s)`);
+            console.log(`   Time window: ${Math.round(savedWidth / 86400)} days (${savedWidth}s) - UNCHANGED`);
             console.log(`   Pivot at: ${new Date(savedRange.pivotTime * 1000).toISOString().substring(0, 16)} (ratio=${savedRange.pivotRatio.toFixed(3)})`);
-            console.log(`   New window: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
+            console.log(`   View: ${new Date(this.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
         } else {
             // Pas de pivot - garder EXACTEMENT la même fenêtre temporelle
             this.state.viewStart = savedRange.start;

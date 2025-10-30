@@ -43691,12 +43691,13 @@ var ChartEngine = class _ChartEngine {
       const savedWidth = savedRange.end - savedRange.start;
       const oldBarsCount = Math.round(savedWidth / oldTFSeconds);
       const newBarsCount = Math.round(savedWidth / newTFSeconds);
-      const newWidth = savedWidth * (newTFSeconds / oldTFSeconds);
+      const newWidth = savedWidth;
       this.state.viewStart = savedRange.pivotTime - newWidth * savedRange.pivotRatio;
       this.state.viewEnd = savedRange.pivotTime + newWidth * (1 - savedRange.pivotRatio);
-      console.log(`\u{1F4CA} TF change with PIVOT: ${oldBarsCount} bars \u2192 ${newBarsCount} bars`);
+      console.log(`\u{1F4CA} TF change with PIVOT (FIXED window): ${oldBarsCount} bars (${oldTFSeconds}s) \u2192 ${newBarsCount} bars (${newTFSeconds}s)`);
+      console.log(`   Time window: ${Math.round(savedWidth / 86400)} days (${savedWidth}s) - UNCHANGED`);
       console.log(`   Pivot at: ${new Date(savedRange.pivotTime * 1e3).toISOString().substring(0, 16)} (ratio=${savedRange.pivotRatio.toFixed(3)})`);
-      console.log(`   New window: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
+      console.log(`   View: ${new Date(this.state.viewStart * 1e3).toISOString().substring(0, 16)} \u2192 ${new Date(this.state.viewEnd * 1e3).toISOString().substring(0, 16)}`);
     } else {
       this.state.viewStart = savedRange.start;
       this.state.viewEnd = savedRange.end;
@@ -44395,7 +44396,8 @@ var AppStore = class {
     this.error = null;
     // --- BUSINESS RULES ---
     this.minBars = 80;
-    this.maxBars = 200;
+    this.maxBars = 240;
+    // Augmenté pour éviter les oscillations (3d→1d = 3x bougies)
     // --- PRIVATE DEPENDENCIES ---
     this.chart = null;
     this.availableTimeframes = [];
