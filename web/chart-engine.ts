@@ -23,6 +23,7 @@ export class ChartEngine {
     layout: ChartLayout;
     rsiData: Map<string, any[]>;
     rsiVisibility: Map<string, boolean>;
+    rsiHistoricalData: Map<string, any[]>; // Cache des données historiques pour RSI temps-réel
     legendContainer: HTMLDivElement;
     overlayParams: any;
     realtimeCandles: Map<string, any>; // TF → candle en cours
@@ -141,6 +142,7 @@ export class ChartEngine {
         // Indicateurs multi-timeframes
         this.rsiData = new Map();
         this.rsiVisibility = new Map();
+        this.rsiHistoricalData = new Map();
 
         // Polling temps réel
         this.realtimeCandles = new Map();
@@ -743,6 +745,19 @@ export class ChartEngine {
         this.realtimeUpdating = true;
 
         try {
+            // Nettoyer les anciennes souscriptions qui ne correspondent pas au symbole actuel
+            const oldSubscriptions = Array.from(this.realtimeSubscribed);
+            for (const streamKey of oldSubscriptions) {
+                const [symbol, _] = streamKey.split(':');
+                if (symbol !== this.state.symbol) {
+                    this.realtimeSubscribed.delete(streamKey);
+                    console.log(`🧹 Removed old subscription: ${streamKey}`);
+                }
+            }
+
+            // Nettoyer les bougies temps-réel de l'ancienne paire
+            this.realtimeCandles.clear();
+
             // Déterminer les TF à surveiller = celles affichées pour le RSI
             const currentIdx = this.timeframes.indexOf(this.state.currentTimeframe);
             const watchedTFs = new Set<string>();
@@ -814,6 +829,11 @@ export class ChartEngine {
                 const msg = JSON.parse(event.data);
 
                 if (msg.type === 'candle_update') {
+                    // Ignorer les mises à jour qui ne correspondent pas au symbole actuel
+                    if (msg.symbol !== this.state.symbol) {
+                        console.log(`⏭️  Ignoring candle update for ${msg.symbol} (current: ${this.state.symbol})`);
+                        return;
+                    }
                     this.handleRealtimeCandle(msg.timeframe, msg.candle, msg.candle.is_closed, true);
                 } else if (msg.type === 'subscribed') {
                     console.log(`✅ Subscribed to ${msg.symbol} [${msg.timeframes.join(', ')}]`);
