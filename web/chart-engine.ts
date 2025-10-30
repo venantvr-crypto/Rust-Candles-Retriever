@@ -1187,7 +1187,8 @@ export class ChartEngine {
         const referenceTimestamps = this.state.data.map(c => c.time);
         console.log(`📊 Reference timestamps: ${referenceTimestamps.length} candles`);
 
-        for (const tf of rsiTimeframes) {
+        // Paralléliser les fetches pour accélérer le chargement
+        const loadPromises = rsiTimeframes.map(async (tf) => {
             try {
                 // Charger avec marge large pour avoir assez de données
                 const margin = (this.state.viewEnd - this.state.viewStart) * 2;
@@ -1213,17 +1214,28 @@ export class ChartEngine {
                     // prendre le dernier RSI calculé <= timestamp
                     const resampled = this.resampleIndicatorToGrid(rsi, referenceTimestamps);
                     console.log(`📊 Resampled to ${resampled.length} points for ${tf}`);
-                    this.rsiData.set(tf, resampled);
 
                     // Initialiser visibilité à true par défaut
                     if (!this.rsiVisibility.has(tf)) {
                         this.rsiVisibility.set(tf, true);
                     }
+
+                    return {tf, resampled, success: true};
                 } else {
                     console.warn(`❌ Not enough data for RSI on ${tf}: ${data?.length || 0} candles (need > ${period})`);
+                    return {tf, success: false};
                 }
             } catch (e) {
                 console.error(`❌ Failed to load RSI data for ${tf}:`, e);
+                return {tf, success: false};
+            }
+        });
+
+        const results = await Promise.all(loadPromises);
+
+        for (const result of results) {
+            if (result.success) {
+                this.rsiData.set(result.tf, result.resampled);
             }
         }
 
