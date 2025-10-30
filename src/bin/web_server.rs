@@ -475,7 +475,7 @@ async fn fetch_gaps(
 /// Trouve une timeframe plus petite disponible
 fn find_smaller_timeframe(conn: &Connection, symbol: &str, target_tf: &str) -> Option<String> {
     let timeframes = vec![
-        "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d",
+        "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d",
     ];
     let target_seconds = parse_timeframe_seconds(target_tf);
 

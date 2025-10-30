@@ -305,6 +305,19 @@ export class ChartEngine {
         console.log(`⚙️ Store connected to ChartEngine`);
     }
 
+    // API pour que le store manipule la vue sans accès direct à state
+    setView(start: number, end: number): void {
+        this.state.viewStart = start;
+        this.state.viewEnd = end;
+    }
+
+    getView(): { start: number, end: number } {
+        return {
+            start: this.state.viewStart,
+            end: this.state.viewEnd
+        };
+    }
+
     updateTheme() {
         const themeColors = chartConfig.getThemeColors();
         this.theme = {
@@ -361,7 +374,8 @@ export class ChartEngine {
 
     handleWheel(e) {
         e.preventDefault();
-        if (this.state.isLoading || this.state.data.length === 0) return;
+        if (this.state.data.length === 0) return;
+        // Note: Ne PAS bloquer sur isLoading - permettre le zoom pendant le chargement
 
         // Delegate to store if available (new architecture)
         if (this.store) {
@@ -373,28 +387,26 @@ export class ChartEngine {
             this.state.isProcessingZoom = true;
             this.state.lastZoomTime = now;
 
-            try {
-                const rect = this.overlayCanvas.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
+            const rect = this.overlayCanvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
 
-                // Calculate pivot
-                const chartWidth = rect.width - this.layout.marginLeft - this.layout.marginRight;
-                const mouseXInChart = mouseX - this.layout.marginLeft;
-                const clampedX = Math.max(0, Math.min(chartWidth, mouseXInChart));
-                const viewWidth = this.state.viewEnd - this.state.viewStart;
-                const pivotRatio = clampedX / chartWidth;
-                const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
+            // Calculate pivot
+            const chartWidth = rect.width - this.layout.marginLeft - this.layout.marginRight;
+            const mouseXInChart = mouseX - this.layout.marginLeft;
+            const clampedX = Math.max(0, Math.min(chartWidth, mouseXInChart));
+            const viewWidth = this.state.viewEnd - this.state.viewStart;
+            const pivotRatio = clampedX / chartWidth;
+            const pivotTime = this.state.viewStart + pivotRatio * viewWidth;
 
-                // Zoom factor
-                const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
+            // Zoom factor
+            const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
 
-                console.log(`🎯 Pivot: time=${new Date(pivotTime * 1000).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}, mouseX=${mouseX.toFixed(0)}`);
+            console.log(`🎯 Pivot: time=${new Date(pivotTime * 1000).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}, mouseX=${mouseX.toFixed(0)}`);
 
-                // Delegate to store (passer le pivotRatio calculé ici!)
-                this.store.updateZoom(zoomFactor, pivotTime, pivotRatio);
-            } finally {
+            // Delegate to store (async - fire and forget, store gère son propre lock)
+            this.store.updateZoom(zoomFactor, pivotTime, pivotRatio).finally(() => {
                 this.state.isProcessingZoom = false;
-            }
+            });
             return;
         }
 
@@ -561,8 +573,13 @@ export class ChartEngine {
         return false;
     }
 
-    checkAndReloadData() {
-        if (this.state.isLoading || this.state.data.length === 0) return;
+    async checkAndReloadData(): Promise<void> {
+        // Ne bloquer que sur les appels concurrents, pas sur isLoading général
+        if (this.state.data.length === 0) return;
+        if (this.state.isLoading) {
+            console.log('⏭️  checkAndReloadData skipped (already loading)');
+            return;
+        }
 
         // Trouver les limites des données chargées
         const dataStart = this.state.data[0].time;
@@ -589,8 +606,8 @@ export class ChartEngine {
                 isSilentReload: true  // Flag pour garder l'affichage visible pendant le chargement
             };
 
-            // Recharger avec la vue actuelle (loadData ajoutera automatiquement les marges)
-            this.loadData(this.state.symbol, this.state.currentTimeframe, savedRange);
+            // AWAIT pour que le store puisse resynchroniser après
+            await this.loadData(this.state.symbol, this.state.currentTimeframe, savedRange);
         }
     }
 

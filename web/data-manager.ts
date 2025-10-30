@@ -80,25 +80,42 @@ export class DataManager {
         currentRange: { start: number; end: number }
     ): Promise<void> {
         const rangeWidth = currentRange.end - currentRange.start;
+        const now = Math.floor(Date.now() / 1000);
 
-        // Prefetch previous chunk
+        // Prefetch previous chunk (silently fail if no data)
         const prevPromise = this.fetch(
             symbol,
             timeframe,
             Math.floor(currentRange.start - rangeWidth),
             Math.floor(currentRange.start)
-        );
+        ).catch(err => {
+            console.log(`[DataManager] Prefetch previous chunk failed (OK, might be no data): ${err.message}`);
+            return [];
+        });
 
-        // Prefetch next chunk
-        const nextPromise = this.fetch(
-            symbol,
-            timeframe,
-            Math.ceil(currentRange.end),
-            Math.ceil(currentRange.end + rangeWidth)
-        );
+        // Prefetch next chunk SEULEMENT si pas dans le futur (silently fail if no data)
+        const nextStart = Math.ceil(currentRange.end);
+        const nextEnd = Math.ceil(currentRange.end + rangeWidth);
+
+        let nextPromise: Promise<any[]>;
+        if (nextStart > now) {
+            // Ne pas précharger le futur
+            console.log(`[DataManager] Skipping future prefetch for ${symbol} ${timeframe}`);
+            nextPromise = Promise.resolve([]);
+        } else {
+            nextPromise = this.fetch(
+                symbol,
+                timeframe,
+                nextStart,
+                Math.min(nextEnd, now)  // Cap au présent
+            ).catch(err => {
+                console.log(`[DataManager] Prefetch next chunk failed (OK, might be no data): ${err.message}`);
+                return [];
+            });
+        }
 
         await Promise.all([prevPromise, nextPromise]);
-        console.log(`[DataManager] Prefetched adjacent data for ${symbol} ${timeframe}`);
+        console.log(`[DataManager] Prefetch completed for ${symbol} ${timeframe}`);
     }
 
     /**
@@ -159,8 +176,14 @@ export class DataManager {
 
         const candles = await response.json();
 
-        if (!Array.isArray(candles) || candles.length === 0) {
-            throw new Error('No data received');
+        if (!Array.isArray(candles)) {
+            throw new Error('Invalid data format received');
+        }
+
+        if (candles.length === 0) {
+            // Pas une erreur - peut être légitime (pas de données dans cette range)
+            console.log(`[DataManager] No candles in range for ${symbol} ${timeframe}`);
+            return [];
         }
 
         console.log(`[DataManager] Fetched ${candles.length} candles`);

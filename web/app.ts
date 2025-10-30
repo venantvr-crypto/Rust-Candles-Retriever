@@ -28,10 +28,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     store.subscribe(() => {
         updateTimeframeDisplay();
         updateLoadingIndicator();
-        // Update candle count from chart if available
-        if (chart && chart.state.data) {
-            updateCandleCount(chart.state.data.length);
-        }
+        // Update candle count: nombre de bougies VISIBLES (pas en mémoire)
+        updateCandleCount(store.getVisibleBarsCount());
     });
 });
 

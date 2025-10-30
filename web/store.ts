@@ -15,14 +15,15 @@ export class AppStore {
     public error: Error | null = null;
 
     // --- BUSINESS RULES ---
-    public minBars: number = 50;
-    public maxBars: number = 150;
+    public minBars: number = 80;
+    public maxBars: number = 200;
 
     // --- PRIVATE DEPENDENCIES ---
     private chart: ChartEngine | null = null;
     private dataManager: DataManager;
     private availableTimeframes: string[] = [];
     private observers: Array<() => void> = [];
+    private isTimeframeChanging: boolean = false;
 
     constructor(dataManager: DataManager) {
         this.dataManager = dataManager;
@@ -98,10 +99,25 @@ export class AppStore {
         this.visibleRange = {start: 0, end: 0};
     }
 
-    async updateZoom(zoomFactor: number, pivotTime: number, pivotRatio: number): Promise<void> {
-        if (this.loadingState === 'loading' || !this.currentPair || !this.chart) return;
+    getVisibleBarsCount(): number {
+        if (this.visibleRange.start === 0 || this.visibleRange.end === 0) return 0;
+        const tfSeconds = this.parseTimeframeToSeconds(this.currentTimeframe);
+        if (tfSeconds === 0) return 0;
+        const width = this.visibleRange.end - this.visibleRange.start;
+        return Math.round(width / tfSeconds);
+    }
 
-        console.log(`[Store] updateZoom: factor=${zoomFactor.toFixed(2)}, pivot=${new Date(pivotTime * 1000).toISOString().substring(0, 16)}, ratio=${pivotRatio.toFixed(3)}`);
+    async updateZoom(zoomFactor: number, pivotTime: number, pivotRatio: number): Promise<void> {
+        // Bloquer si changement de TF en cours ou chargement en cours
+        if (this.isTimeframeChanging) {
+            console.log(`⏭️ Zoom blocked: TF change in progress`);
+            return;
+        }
+        if (this.loadingState === 'loading') {
+            console.log(`⏭️ Zoom blocked: loading in progress`);
+            return;
+        }
+        if (!this.currentPair || !this.chart) return;
 
         // Utiliser le pivotRatio passé par chart-engine (déjà calculé avec les bonnes valeurs)
         // Ne PAS le recalculer ici car visibleRange peut être désynchronisé!
@@ -111,13 +127,22 @@ export class AppStore {
         const newViewStart = pivotTime - newWidth * pivotRatio;
         const newViewEnd = pivotTime + newWidth * (1 - pivotRatio);
 
-        this.visibleRange = {start: newViewStart, end: newViewEnd};
-
         // Check if TF change needed
         const tfSeconds = this.parseTimeframeToSeconds(this.currentTimeframe);
         if (tfSeconds === 0) return;
 
         const newVisibleBars = newWidth / tfSeconds;
+
+        // Calculer aussi avec les valeurs du chart pour comparer
+        const chartView = this.chart.getView();
+        const chartWidth = chartView.end - chartView.start;
+        const chartBars = chartWidth / tfSeconds;
+
+        console.log(`[Store] updateZoom: factor=${zoomFactor.toFixed(2)}`);
+        console.log(`   OLD: width=${Math.round(oldWidth)}s, bars=${Math.round(oldWidth / tfSeconds)}`);
+        console.log(`   NEW: width=${Math.round(newWidth)}s, bars=${Math.round(newVisibleBars)} (limits: ${this.minBars}-${this.maxBars})`);
+        console.log(`   CHART: width=${Math.round(chartWidth)}s, bars=${Math.round(chartBars)}`);
+        console.log(`   TF: ${this.currentTimeframe} = ${tfSeconds}s per bar`);
 
         let didChangeTimeframe = false;
 
@@ -128,6 +153,8 @@ export class AppStore {
                 console.log(`[Store] 🔍 Zoom IN: ${Math.round(newVisibleBars)} bars < ${this.minBars}. Switch ${this.currentTimeframe} → ${smallerTF}`);
                 await this.setTimeframeInternal(smallerTF, pivotTime, pivotRatio);
                 didChangeTimeframe = true;
+            } else {
+                console.log(`[Store] ⛔ Zoom IN blocked: no smaller TF available (already at ${this.currentTimeframe})`);
             }
         }
         // Zoom OUT (> maxBars)
@@ -137,26 +164,37 @@ export class AppStore {
                 console.log(`[Store] 🔎 Zoom OUT: ${Math.round(newVisibleBars)} bars > ${this.maxBars}. Switch ${this.currentTimeframe} → ${largerTF}`);
                 await this.setTimeframeInternal(largerTF, pivotTime, pivotRatio);
                 didChangeTimeframe = true;
+            } else {
+                console.log(`[Store] ⛔ Zoom OUT blocked: no larger TF available (already at ${this.currentTimeframe})`);
             }
         }
 
+        // Update visible range
+        this.visibleRange = {start: newViewStart, end: newViewEnd};
+
         // Load data if TF didn't change (need to update chart view)
         if (!didChangeTimeframe) {
-            // Update chart view directly without reloading
-            this.chart.state.viewStart = this.visibleRange.start;
-            this.chart.state.viewEnd = this.visibleRange.end;
+            // Update chart view via API (encapsulation - pas d'accès direct à state!)
+            this.chart.setView(this.visibleRange.start, this.visibleRange.end);
 
-            console.log(`📐 Updated chart view: ${new Date(this.chart.state.viewStart * 1000).toISOString().substring(0, 16)} → ${new Date(this.chart.state.viewEnd * 1000).toISOString().substring(0, 16)}`);
+            console.log(`📐 Updated chart view: ${new Date(this.visibleRange.start * 1000).toISOString().substring(0, 16)} → ${new Date(this.visibleRange.end * 1000).toISOString().substring(0, 16)}`);
 
-            // Check if we need more data
+            // Check if we need more data (AWAIT car peut recharger les données)
             await this.chart.checkAndReloadData();
+
+            // Resynchroniser car checkAndReloadData() peut avoir appelé loadData()
+            const chartView = this.chart.getView();
+            if (chartView.start !== this.visibleRange.start || chartView.end !== this.visibleRange.end) {
+                console.log(`⚠️ Chart adjusted view during reload: store will resync`);
+                this.visibleRange.start = chartView.start;
+                this.visibleRange.end = chartView.end;
+            }
 
             // Render
             this.chart.render();
 
-            // Resynchroniser visibleRange avec le state du chart après render
-            this.visibleRange.start = this.chart.state.viewStart;
-            this.visibleRange.end = this.chart.state.viewEnd;
+            // Notifier les observers (UI) que visibleRange a changé
+            this.notifyObservers();
         }
     }
 
@@ -193,13 +231,12 @@ export class AppStore {
     private async setTimeframeInternal(newTimeframe: string, pivotTime?: number, pivotRatio?: number): Promise<void> {
         if (newTimeframe === this.currentTimeframe || !this.currentPair || !this.chart) return;
 
+        // Bloquer les autres zooms pendant le changement
+        this.isTimeframeChanging = true;
+
         const oldTF = this.currentTimeframe;
-        this.currentTimeframe = newTimeframe;
-        localStorage.setItem('selectedTimeframe', newTimeframe);
 
-        console.log(`[Store] TF change: ${oldTF} → ${newTimeframe}, pivot=${pivotTime ? new Date(pivotTime * 1000).toISOString().substring(0, 16) : 'N/A'}, ratio=${pivotRatio?.toFixed(3)}`);
-
-        this.notifyObservers();
+        console.log(`[Store] TF change START: ${oldTF} → ${newTimeframe}, pivot=${pivotTime ? new Date(pivotTime * 1000).toISOString().substring(0, 16) : 'N/A'}, ratio=${pivotRatio?.toFixed(3)}`);
 
         // Prepare savedRange with pivot info
         const savedRange = {
@@ -211,12 +248,27 @@ export class AppStore {
             isSilentReload: true  // Garder l'affichage actuel pendant le changement de TF
         };
 
-        // Use ChartEngine's loadData which preserves pivot
-        await this.chart.loadData(this.currentPair, this.currentTimeframe, savedRange);
+        try {
+            // Use ChartEngine's loadData which preserves pivot
+            await this.chart.loadData(this.currentPair, newTimeframe, savedRange);
 
-        // Update store's visible range from chart (chart may have adjusted it)
-        this.visibleRange.start = this.chart.state.viewStart;
-        this.visibleRange.end = this.chart.state.viewEnd;
+            // SEULEMENT MAINTENANT mettre à jour le TF et notifier (après chargement)
+            this.currentTimeframe = newTimeframe;
+            localStorage.setItem('selectedTimeframe', newTimeframe);
+
+            // Synchroniser avec la vue finale du chart (il peut l'avoir ajustée)
+            const chartView = this.chart.getView();
+            this.visibleRange.start = chartView.start;
+            this.visibleRange.end = chartView.end;
+
+            console.log(`[Store] TF change DONE: ${oldTF} → ${newTimeframe}`);
+
+            // Notifier APRÈS que tout soit cohérent
+            this.notifyObservers();
+        } finally {
+            // Débloquer les zooms
+            this.isTimeframeChanging = false;
+        }
     }
 
     private async loadDataForCurrentView(isFullReset: boolean = false): Promise<void> {
