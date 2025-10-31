@@ -5,4 +5,4 @@
 *.db
 *.db-journal
 *.lock
-/web/node_modules/
+
