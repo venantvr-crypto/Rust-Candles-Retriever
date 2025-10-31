@@ -44,7 +44,7 @@ export class DataManager {
         // 2. Deduplicate identical requests
         if (this.inflightRequests.has(key)) {
             console.log(`[DataManager] Deduplicating request: ${key}`);
-            return this.inflightRequests.get(key)!;
+            return await this.inflightRequests.get(key)!;
         }
 
         // 3. Fetch from API
@@ -130,6 +130,20 @@ export class DataManager {
         }
         keysToDelete.forEach(key => this.cache.delete(key));
         console.log(`[DataManager] Cleared cache for ${symbol} (${keysToDelete.length} entries)`);
+    }
+
+    /**
+     * Invalidate cache for a specific symbol+timeframe (after data changes)
+     */
+    invalidate(symbol: string, timeframe: string): void {
+        const keysToDelete: string[] = [];
+        for (const key of this.cache.keys()) {
+            if (key.startsWith(`${symbol}:${timeframe}:`)) {
+                keysToDelete.push(key);
+            }
+        }
+        keysToDelete.forEach(key => this.cache.delete(key));
+        console.log(`[DataManager] Invalidated cache for ${symbol}/${timeframe} (${keysToDelete.length} entries)`);
     }
 
     /**

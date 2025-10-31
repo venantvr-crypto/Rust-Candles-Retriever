@@ -46,6 +46,46 @@ impl GapFiller {
     /// FORMULE: valeur = A + (B-A) × ratio
     ///
     /// RETOUR: Nombre de bougies interpolées
+
+    /// Compte le nombre de gaps dans une plage sans les remplir
+    ///
+    /// RETOUR: Nombre de bougies manquantes (gaps)
+    pub fn count_gaps_in_range(
+        conn: &Connection,
+        provider: &str,
+        symbol: &str,
+        timeframe: &str,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<i64> {
+        let interval = Self::timeframe_to_interval(timeframe);
+
+        // Récupérer toutes les bougies existantes dans la plage
+        let candles =
+            Self::fetch_candles_in_range(conn, provider, symbol, timeframe, start_time, end_time)?;
+
+        if candles.len() < 2 {
+            return Ok(0);
+        }
+
+        let mut total_gaps = 0i64;
+
+        // Fenêtre glissante: parcourir paires de bougies consécutives
+        for i in 0..candles.len() - 1 {
+            let current = &candles[i];
+            let next = &candles[i + 1];
+
+            let time_diff = next.open_time - current.open_time;
+
+            if time_diff > interval {
+                let missing_candles = (time_diff / interval) - 1;
+                total_gaps += missing_candles;
+            }
+        }
+
+        Ok(total_gaps)
+    }
+
     pub fn fill_gaps_in_range(
         conn: &mut Connection,
         provider: &str,

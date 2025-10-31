@@ -312,6 +312,126 @@ async fn get_candles(
     }
 }
 
+/// Valeur RSI pour l'API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RSIValue {
+    time: i64,      // timestamp en secondes
+    rsi_value: f64, // valeur RSI
+}
+
+/// Paramètres de requête pour les RSI
+#[derive(Debug, Deserialize)]
+struct RSIQuery {
+    symbol: String,
+    timeframe: String,
+    period: Option<i64>, // Period par défaut: 14
+    limit: Option<usize>,
+    start: Option<i64>, // Timestamp de début en secondes
+    end: Option<i64>,   // Timestamp de fin en secondes
+}
+
+/// GET /api/rsi - Récupère les RSI pré-calculés pour une paire/timeframe
+#[get("/api/rsi")]
+async fn get_rsi(
+    data: web::Data<Mutex<AppState>>,
+    query: web::Query<RSIQuery>,
+) -> impl Responder {
+    let symbol = query.symbol.clone();
+    let timeframe = query.timeframe.clone();
+    let period = query.period.unwrap_or(14);
+    let start = query.start;
+    let end = query.end;
+    let limit = query.limit.unwrap_or(5000);
+
+    let db_dir = {
+        let state = data.lock().unwrap();
+        state.db_dir.clone()
+    };
+
+    // Exécuter la requête DB
+    let result = web::block(move || {
+        let db_path = format!("{}/{}.db", db_dir, symbol);
+
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("Database error for {}: {}", symbol, e))?;
+
+        // Construire la requête SQL
+        let mut sql = String::from(
+            "SELECT open_time, rsi_value
+             FROM rsi_values
+             WHERE provider = 'binance'
+               AND symbol = ?1
+               AND timeframe = ?2
+               AND period = ?3",
+        );
+
+        let mut param_index = 4;
+
+        if start.is_some() {
+            sql.push_str(&format!(" AND open_time >= ?{}", param_index));
+            param_index += 1;
+        }
+
+        if end.is_some() {
+            sql.push_str(&format!(" AND open_time <= ?{}", param_index));
+            param_index += 1;
+        }
+
+        sql.push_str(" ORDER BY open_time ASC");
+        sql.push_str(&format!(" LIMIT ?{}", param_index));
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        // Construire les paramètres
+        let mut query_params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(symbol.clone()), Box::new(timeframe.clone()), Box::new(period)];
+
+        if let Some(s) = start {
+            query_params.push(Box::new(s * 1000)); // Convertir secondes en ms
+        }
+
+        if let Some(e) = end {
+            query_params.push(Box::new(e * 1000)); // Convertir secondes en ms
+        }
+
+        query_params.push(Box::new(limit));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            query_params.iter().map(|p| p.as_ref()).collect();
+
+        let rsi_iter = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(RSIValue {
+                    time: row.get::<_, i64>(0)? / 1000, // Convertir ms en secondes
+                    rsi_value: row.get(1)?,
+                })
+            })
+            .map_err(|e| format!("Query mapping error: {}", e))?;
+
+        let mut rsi_values: Vec<RSIValue> = Vec::new();
+        for rsi_result in rsi_iter {
+            if let Ok(rsi) = rsi_result {
+                rsi_values.push(rsi);
+            }
+        }
+
+        Ok::<Vec<RSIValue>, String>(rsi_values)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(rsi_values)) => HttpResponse::Ok().json(rsi_values),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Blocking error: {}", e)
+        })),
+    }
+}
+
 /// Paramètres de requête pour les bougies temps réel
 #[derive(Debug, Deserialize)]
 struct RealtimeCandlesQuery {
@@ -377,6 +497,8 @@ async fn subscribe_realtime(
 struct FetchQuery {
     symbol: String,
     timeframe: String,
+    start: Option<i64>, // Timestamp de début en secondes (optionnel)
+    end: Option<i64>,   // Timestamp de fin en secondes (optionnel)
 }
 
 /// POST /api/fetch - Comble les gaps dynamiquement (boucle jusqu'à complet)
@@ -404,12 +526,62 @@ async fn fetch_gaps(
             Err(e) => return Err(format!("Failed to open database: {}", e)),
         };
 
+        // OPTIMISATION: Vérifier d'abord s'il y a des gaps
+        // Utiliser la plage fournie ou prendre toute la plage disponible
+        let (start_check, end_check) = if query.start.is_some() && query.end.is_some() {
+            // Plage fournie par le frontend
+            (query.start.unwrap() * 1000, query.end.unwrap() * 1000)
+        } else {
+            // Récupérer min/max depuis la BDD
+            let mut stmt = conn.prepare(
+                "SELECT MIN(open_time), MAX(open_time) FROM candlesticks
+                 WHERE provider = 'binance' AND symbol = ?1 AND timeframe = ?2"
+            ).map_err(|e| format!("Failed to query range: {}", e))?;
+
+            let range: Result<(Option<i64>, Option<i64>), _> = stmt.query_row(
+                rusqlite::params![&symbol, &timeframe],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            );
+
+            match range {
+                Ok((Some(min), Some(max))) => (min, max),
+                _ => {
+                    // Pas de données, on fetch quand même
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64;
+                    (now - (30 * 24 * 60 * 60 * 1000), now)
+                }
+            }
+        };
+
+        match rust_candles_retriever::gap_filler::GapFiller::count_gaps_in_range(
+            &conn,
+            "binance",
+            &symbol,
+            &timeframe,
+            start_check,
+            end_check,
+        ) {
+            Ok(gap_count) => {
+                if gap_count == 0 {
+                    println!("✅ Aucun gap détecté pour {}/{}", symbol, timeframe);
+                    return Ok((symbol.clone(), timeframe.clone(), 0i64, 0));
+                }
+                println!("🔍 {} gaps détectés pour {}/{}, fetch...", gap_count, symbol, timeframe);
+            }
+            Err(e) => {
+                println!("⚠️ Erreur vérification gaps: {}, fetch quand même...", e);
+            }
+        }
+
         // Créer un nouveau client Binance dans ce thread (évite problème runtime Tokio)
         let market: Market = Binance::new(None, None);
 
         let mut total_inserted = 0i64;
         let mut iterations = 0;
-        const MAX_ITERATIONS: i32 = 10; // Limite pour éviter boucle infinie
+        const MAX_ITERATIONS: i32 = 5; // Réduit de 10 à 5
 
         // Boucler jusqu'à combler le gap ou atteindre limite
         loop {
@@ -427,10 +599,12 @@ async fn fetch_gaps(
             match retriever.fetch_one_batch() {
                 Ok((inserted, is_exhausted)) => {
                     total_inserted += inserted;
-                    println!(
-                        "📦 Batch {}: {} bougies insérées pour {}/{}",
-                        iterations, inserted, symbol, timeframe
-                    );
+                    if inserted > 0 {
+                        println!(
+                            "📦 Batch {}: {} bougies insérées pour {}/{}",
+                            iterations, inserted, symbol, timeframe
+                        );
+                    }
 
                     // Arrêter si: aucune insertion OU épuisé
                     if inserted == 0 || is_exhausted {
@@ -442,8 +616,10 @@ async fn fetch_gaps(
                 }
             }
 
-            // Pause courte entre batches
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Pause réduite entre batches (seulement si on continue)
+            if total_inserted > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
 
         Ok((
@@ -918,6 +1094,7 @@ async fn main() -> std::io::Result<()> {
             .service(health)
             .service(get_pairs)
             .service(get_candles)
+            .service(get_rsi)
             .service(fetch_gaps)
             .route("/ws/realtime", web::get().to(ws_realtime))
             .service(Files::new("/", "./web").index_file("index.html"))

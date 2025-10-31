@@ -59,12 +59,14 @@ export interface ChartCallbacks {
     onLoadData: (symbol: string, timeframe: string, start?: number, end?: number) => Promise<Candle[]>;
     onTimeframeChange: (newTimeframe: string, savedRange: SavedRange) => Promise<void>;
     onError: (error: Error) => void;
+    onInvalidateCache: (symbol: string, timeframe: string) => void;
 }
 
 export interface ChartOptions {
     onLoadData?: (symbol: string, timeframe: string, start?: number, end?: number) => Promise<Candle[]>;
     onTimeframeChange?: (newTimeframe: string, savedRange: SavedRange) => Promise<void>;
     onError?: (error: Error) => void;
+    onInvalidateCache?: (symbol: string, timeframe: string) => void;
 }
 
 export interface SavedRange {

@@ -24,6 +24,7 @@ export class ChartEngine {
     rsiData: Map<string, any[]>;
     rsiVisibility: Map<string, boolean>;
     rsiHistoricalData: Map<string, any[]>; // Cache des données historiques pour RSI temps-réel
+    rsiState: Map<string, {avgGain: number, avgLoss: number, lastClose: number}>; // State pour RSI incrémental O(1)
     legendContainer: HTMLDivElement;
     overlayParams: any;
     realtimeCandles: Map<string, any>; // TF → candle en cours
@@ -47,6 +48,7 @@ export class ChartEngine {
     renderScheduled: boolean;
     overlayRenderScheduled: boolean;
     rafId: number | null;
+    realtimeRSIThrottleTimer: number | null; // Throttle RSI updates temps réel
 
     private constructor(container: HTMLElement, app: PIXI.Application, options: ChartOptions = {}) {
         this.container = container;
@@ -144,6 +146,7 @@ export class ChartEngine {
         this.rsiData = new Map();
         this.rsiVisibility = new Map();
         this.rsiHistoricalData = new Map();
+        this.rsiState = new Map(); // State pour calcul incrémental O(1): {avgGain, avgLoss, lastClose}
 
         // Polling temps réel
         this.realtimeCandles = new Map();
@@ -155,6 +158,7 @@ export class ChartEngine {
         this.renderScheduled = false;
         this.overlayRenderScheduled = false;
         this.rafId = null;
+        this.realtimeRSIThrottleTimer = null; // Throttle RSI updates à 1/sec max
 
         // Conteneur pour légendes interactives
         this.legendContainer = document.createElement('div');
@@ -202,7 +206,8 @@ export class ChartEngine {
             onLoadData: options.onLoadData || (async () => []),
             onTimeframeChange: options.onTimeframeChange || (async () => {
             }),
-            onError: options.onError || console.error
+            onError: options.onError || console.error,
+            onInvalidateCache: options.onInvalidateCache || (() => {})
         };
 
         // Style (sera mis à jour depuis config)
@@ -292,6 +297,51 @@ export class ChartEngine {
         return rsi;
     }
 
+    /**
+     * Calcul incrémental RSI O(1) pour mises à jour temps réel
+     * Nécessite state initialisé (avgGain, avgLoss, lastClose)
+     */
+    calculateIncrementalRSI(newClose, tf, period = 14) {
+        if (!this.rsiState.has(tf)) {
+            return null; // State pas initialisé, fallback à full calc
+        }
+
+        const state = this.rsiState.get(tf);
+        const change = newClose - state.lastClose;
+        const gain = Math.max(change, 0);
+        const loss = Math.abs(Math.min(change, 0));
+
+        // Update EMA incrementally
+        state.avgGain = (state.avgGain * (period - 1) + gain) / period;
+        state.avgLoss = (state.avgLoss * (period - 1) + loss) / period;
+        state.lastClose = newClose;
+
+        const rs = state.avgGain / state.avgLoss;
+        return 100 - (100 / (1 + rs));
+    }
+
+    /**
+     * Initialise le state RSI pour permettre les updates incrémentaux
+     */
+    initRSIState(tf, candles, period = 14) {
+        if (candles.length < period + 1) return;
+
+        // Calculer avgGain/avgLoss initial sur première période
+        let gains = 0, losses = 0;
+        for (let i = 1; i <= period; i++) {
+            const change = candles[i].close - candles[i - 1].close;
+            if (change > 0) gains += change;
+            else losses += Math.abs(change);
+        }
+
+        const avgGain = gains / period;
+        const avgLoss = losses / period;
+        const lastClose = candles[candles.length - 1].close;
+
+        this.rsiState.set(tf, { avgGain, avgLoss, lastClose });
+        console.log(`🔧 RSI state initialized for ${tf}: avgGain=${avgGain.toFixed(4)}, avgLoss=${avgLoss.toFixed(4)}`);
+    }
+
     setTimeframes(timeframes) {
         // Create a copy and sort to avoid mutating the original
         this.timeframes = [...timeframes].sort((a, b) =>
@@ -372,7 +422,7 @@ export class ChartEngine {
         window.addEventListener('resize', () => this.handleResize());
     }
 
-    handleWheel(e) {
+    async handleWheel(e) {
         e.preventDefault();
         if (this.state.data.length === 0) return;
         // Note: Ne PAS bloquer sur isLoading - permettre le zoom pendant le chargement
@@ -452,7 +502,7 @@ export class ChartEngine {
             this.state.viewStart = pivotTime - newWidth * pivotRatio;
             this.state.viewEnd = pivotTime + newWidth * (1 - pivotRatio);
 
-            const didChange = this.checkAndSwitchTimeframe(pivotTime, pivotRatio);
+            const didChange = await this.checkAndSwitchTimeframe(pivotTime, pivotRatio);
 
             if (!didChange) {
                 const currentWidth = this.state.viewEnd - this.state.viewStart;
@@ -461,7 +511,7 @@ export class ChartEngine {
                     this.state.viewEnd = pivotTime + minWidth * (1 - pivotRatio);
                 }
 
-                this.checkAndReloadData();
+                void this.checkAndReloadData(); // Fire-and-forget: async reload sans bloquer zoom
                 this.scheduleRender();
             }
         } finally {
@@ -509,7 +559,7 @@ export class ChartEngine {
     handleMouseUp() {
         this.state.isDragging = false;
         this.overlayCanvas.style.cursor = 'crosshair';
-        this.checkAndReloadData();
+        void this.checkAndReloadData(); // Check après drag si besoin reload
     }
 
     handleDrag(e) {
@@ -531,7 +581,7 @@ export class ChartEngine {
         this.render();
     }
 
-    checkAndSwitchTimeframe(pivotTime = null, pivotRatio = null) {
+    async checkAndSwitchTimeframe(pivotTime = null, pivotRatio = null) {
         const viewWidth = this.state.viewEnd - this.state.viewStart;
         const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
         const visibleBars = viewWidth / tfSeconds;
@@ -550,7 +600,7 @@ export class ChartEngine {
             };
             console.log(`🔽 Zoom IN: ${this.state.currentTimeframe} → ${newTF} (${Math.round(visibleBars)} bars < ${this.state.minBars})`);
             console.log(`   💾 Saving current view with pivot at ${pivotTime ? new Date(pivotTime * 1000).toISOString().substring(0, 16) : 'N/A'} (ratio: ${pivotRatio ? pivotRatio.toFixed(3) : 'N/A'})`);
-            this.callbacks.onTimeframeChange(newTF, savedRange);
+            await this.callbacks.onTimeframeChange(newTF, savedRange);
             return true;
         }
 
@@ -566,7 +616,7 @@ export class ChartEngine {
             };
             console.log(`🔼 Zoom OUT: ${this.state.currentTimeframe} → ${newTF} (${Math.round(visibleBars)} bars > ${this.state.maxBars})`);
             console.log(`   💾 Saving current view with pivot at ${pivotTime ? new Date(pivotTime * 1000).toISOString().substring(0, 16) : 'N/A'} (ratio: ${pivotRatio ? pivotRatio.toFixed(3) : 'N/A'})`);
-            this.callbacks.onTimeframeChange(newTF, savedRange);
+            await this.callbacks.onTimeframeChange(newTF, savedRange);
             return true;
         }
 
@@ -731,7 +781,7 @@ export class ChartEngine {
             this.render();
 
             // Démarrer/mettre à jour WebSocket (ne fait rien si config inchangée)
-            this.startRealtimeUpdates();
+            await this.startRealtimeUpdates();
 
         } catch (error) {
             this.callbacks.onError(error);
@@ -755,14 +805,19 @@ export class ChartEngine {
             console.log(`🔍 Gap détecté: ${Math.floor(missingCandles)} bougies manquantes, fetch...`);
 
             try {
-                const response = await fetch(`/api/fetch?symbol=${symbol}&timeframe=${timeframe}`, {
+                // Fetch depuis la dernière bougie jusqu'à maintenant pour combler le gap
+                const start = Math.floor(lastCandle.time);
+                const end = Math.ceil(now);
+                const response = await fetch(`/api/fetch?symbol=${symbol}&timeframe=${timeframe}&start=${start}&end=${end}`, {
                     method: 'POST'
                 });
 
                 if (response.ok) {
                     const result = await response.json();
                     if (result.inserted > 0) {
-                        console.log(`✅ ${result.inserted} bougies ajoutées`);
+                        console.log(`✅ ${result.inserted} bougies ajoutées, invalidating cache...`);
+                        // Invalider le cache pour forcer le rechargement des nouvelles données
+                        this.callbacks.onInvalidateCache(symbol, timeframe);
                         return true;
                     }
                 }
@@ -943,16 +998,49 @@ export class ChartEngine {
                     }
                     updated = true;
                 } else if (candle.time > lastCandle.time + tfSeconds) {
-                    // Gap détecté mais on ne reload PAS : les bougies intermédiaires sont simplement manquantes
-                    // Le WebSocket n'envoie que la bougie actuelle, pas l'historique
-                    console.log(`📍 Skipping gap (${Math.floor((candle.time - lastCandle.time - tfSeconds) / tfSeconds)} candles missing), adding current candle`);
+                    // Gap détecté : fetch et reload
+                    const missingCount = Math.floor((candle.time - lastCandle.time - tfSeconds) / tfSeconds);
+                    console.log(`📍 Gap detected (${missingCount} candles missing), fetching and reloading...`);
+
+                    // Fetch, invalider cache, recharger
+                    void fetch(`/api/fetch?symbol=${this.state.symbol}&timeframe=${timeframe}&start=${lastCandle.time}&end=${candle.time}`, {
+                        method: 'POST'
+                    }).then(async (response) => {
+                        if (response.ok) {
+                            const result = await response.json();
+                            if (result.inserted > 0) {
+                                console.log(`✅ Gap filled: ${result.inserted} candles, invalidating cache and reloading...`);
+                                // 1. Invalider le cache
+                                this.callbacks.onInvalidateCache(this.state.symbol, timeframe);
+                                // 2. Recharger les données (maintenant sans cache)
+                                const newData = await this.callbacks.onLoadData(this.state.symbol, timeframe, null, null);
+                                if (newData && newData.length > 0) {
+                                    this.state.data = newData;
+                                    // 3. Recharger le RSI pour toutes les TF
+                                    await this.loadIndicatorData(this.state.symbol, this.state.currentTimeframe);
+                                    // 4. Render
+                                    this.scheduleRender();
+                                    console.log(`🔄 Data reloaded after gap fill: ${newData.length} candles`);
+                                }
+                            }
+                        }
+                    }).catch(e => console.error('❌ Gap fill error:', e));
+
+                    // En attendant, ajouter la bougie actuelle pour l'affichage immédiat
                     this.state.data.push(candle);
                     updated = true;
                 }
 
                 if (updated) {
-                    // Recalculer le RSI pour toutes les TF visibles (pas seulement currentTimeframe)
-                    this.updateRealtimeRSIForAllTimeframes();
+                    // Throttle RSI updates à 1/sec max pour éviter CPU spikes
+                    if (this.realtimeRSIThrottleTimer) {
+                        clearTimeout(this.realtimeRSIThrottleTimer);
+                    }
+                    this.realtimeRSIThrottleTimer = setTimeout(() => {
+                        // Recalculer le RSI pour toutes les TF visibles (incrémental O(1))
+                        this.updateRealtimeRSIForAllTimeframes();
+                        this.realtimeRSIThrottleTimer = null;
+                    }, 1000);
 
                     // Planifier render seulement si demandé
                     if (shouldRender) {
@@ -1065,7 +1153,7 @@ export class ChartEngine {
                 // Si on n'a pas de données historiques pour cette TF, on lance un chargement asynchrone
                 if (!this.rsiHistoricalData.has(tf)) {
                     // Lancer le chargement en arrière-plan (ne pas attendre)
-                    this.loadHistoricalDataForRSI(tf, period);
+                    void this.loadHistoricalDataForRSI(tf, period);
                     continue;
                 }
 
@@ -1092,20 +1180,25 @@ export class ChartEngine {
                     }
                 }
 
-                // Calculer le RSI sur ces données
+                // Calculer le RSI: utiliser incrémental O(1) si state disponible
                 if (data.length > period + 1) {
-                    const rsi = this.calculateRSI(data, period);
+                    const newRSI = this.calculateIncrementalRSI(realtimeCandle.close, tf, period);
 
-                    // Mettre à jour seulement les derniers points du RSI existant
-                    const rsiPointsToReplace = Math.min(rsi.length, 10);
-
-                    if (existingRSI.length > rsiPointsToReplace) {
-                        // Garder le début, remplacer la fin
-                        const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
-                        this.rsiData.set(tf, updatedRSI);
+                    if (newRSI !== null && existingRSI.length > 0) {
+                        // Update incrémental O(1): remplacer seulement le dernier point
+                        existingRSI[existingRSI.length - 1].value = newRSI;
                     } else {
-                        // Pas assez de données existantes, tout remplacer
-                        this.rsiData.set(tf, rsi);
+                        // Fallback: recalcul complet si state pas initialisé
+                        console.warn(`⚠️ RSI state not initialized for ${tf}, falling back to full calculation`);
+                        const rsi = this.calculateRSI(data, period);
+                        const rsiPointsToReplace = Math.min(rsi.length, 10);
+
+                        if (existingRSI.length > rsiPointsToReplace) {
+                            const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
+                            this.rsiData.set(tf, updatedRSI);
+                        } else {
+                            this.rsiData.set(tf, rsi);
+                        }
                     }
                 }
             } catch (e) {
@@ -1187,33 +1280,49 @@ export class ChartEngine {
         const referenceTimestamps = this.state.data.map(c => c.time);
         console.log(`📊 Reference timestamps: ${referenceTimestamps.length} candles`);
 
-        // Paralléliser les fetches pour accélérer le chargement
-        const loadPromises = rsiTimeframes.map(async (tf) => {
+        // Charger la TF actuelle en priorité, puis les autres en arrière-plan
+        const currentTF = this.state.currentTimeframe;
+        const otherTFs = rsiTimeframes.filter(tf => tf !== currentTF);
+
+        // Fonction de chargement pour une TF depuis l'API
+        const loadTF = async (tf: string) => {
             try {
-                // Charger avec marge large pour avoir assez de données
-                const margin = (this.state.viewEnd - this.state.viewStart) * 2;
-                console.log(`📊 Loading ${tf} data for RSI (${this.state.symbol})...`);
-                let data = await this.callbacks.onLoadData(
-                    this.state.symbol,
-                    tf,
-                    Math.floor(this.state.viewStart - margin),
-                    Math.ceil(this.state.viewEnd + margin)
-                );
+                console.log(`📊 Loading RSI from API for ${this.state.symbol} ${tf}...`);
 
-                console.log(`📊 Loaded ${data?.length || 0} candles for ${tf}`);
+                // Fetch RSI depuis l'API (pre-calculés en BDD)
+                const url = `/api/rsi?symbol=${this.state.symbol}&timeframe=${tf}&period=${period}&start=${Math.floor(this.state.viewStart)}&end=${Math.ceil(this.state.viewEnd)}`;
+                const response = await fetch(url);
 
-                if (data && data.length > period) {
-                    // Stocker les données historiques dans le cache pour les mises à jour temps-réel
-                    const maxSamples = period * 2; // 28 pour period=14
-                    this.rsiHistoricalData.set(tf, data.slice(-maxSamples));
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
 
-                    const rsi = this.calculateRSI(data, period);
-                    console.log(`📊 Calculated ${rsi.length} RSI points for ${tf}`);
+                const rsiValues = await response.json();
+                console.log(`📊 Loaded ${rsiValues.length} RSI values for ${tf}`);
 
+                if (rsiValues.length > 0) {
                     // Rééchantillonner: pour chaque timestamp de candle affiché,
                     // prendre le dernier RSI calculé <= timestamp
-                    const resampled = this.resampleIndicatorToGrid(rsi, referenceTimestamps);
+                    const rsiData = rsiValues.map(r => ({ time: r.time, value: r.rsi_value }));
+                    const resampled = this.resampleIndicatorToGrid(rsiData, referenceTimestamps);
                     console.log(`📊 Resampled to ${resampled.length} points for ${tf}`);
+
+                    // Charger les 28 dernières candles pour le cache temps-réel
+                    const maxSamples = period * 2;
+                    const tfSeconds = this.parseTimeframeToSeconds(tf);
+                    const margin = tfSeconds * maxSamples;
+
+                    const candlesData = await this.callbacks.onLoadData(
+                        this.state.symbol,
+                        tf,
+                        Math.floor(Date.now() / 1000 - margin),
+                        Math.ceil(Date.now() / 1000)
+                    );
+
+                    if (candlesData && candlesData.length > 0) {
+                        this.rsiHistoricalData.set(tf, candlesData.slice(-maxSamples));
+                        this.initRSIState(tf, candlesData, period);
+                    }
 
                     // Initialiser visibilité à true par défaut
                     if (!this.rsiVisibility.has(tf)) {
@@ -1222,25 +1331,41 @@ export class ChartEngine {
 
                     return {tf, resampled, success: true};
                 } else {
-                    console.warn(`❌ Not enough data for RSI on ${tf}: ${data?.length || 0} candles (need > ${period})`);
+                    console.warn(`❌ No RSI data for ${tf}`);
                     return {tf, success: false};
                 }
             } catch (e) {
                 console.error(`❌ Failed to load RSI data for ${tf}:`, e);
                 return {tf, success: false};
             }
-        });
+        };
 
-        const results = await Promise.all(loadPromises);
-
-        for (const result of results) {
+        // Charger la TF actuelle en premier (bloquant)
+        if (rsiTimeframes.includes(currentTF)) {
+            const result = await loadTF(currentTF);
             if (result.success) {
                 this.rsiData.set(result.tf, result.resampled);
+                console.log(`📊 RSI loaded for current TF: ${currentTF}`);
+                this.updateRSILegend();
+                this.render(); // Rendu immédiat avec la TF actuelle
             }
         }
 
-        console.log(`📊 RSI data loaded for ${this.rsiData.size} timeframes`);
-        this.updateRSILegend();
+        // Charger les autres TF en arrière-plan (non-bloquant)
+        if (otherTFs.length > 0) {
+            Promise.all(otherTFs.map(loadTF)).then(results => {
+                for (const result of results) {
+                    if (result.success) {
+                        this.rsiData.set(result.tf, result.resampled);
+                    }
+                }
+                console.log(`📊 RSI data loaded for ${this.rsiData.size} timeframes`);
+                this.updateRSILegend();
+                this.render(); // Re-rendu avec toutes les TF
+            });
+        } else {
+            console.log(`📊 RSI data loaded for ${this.rsiData.size} timeframes`);
+        }
     }
 
     updateRSILegend() {
@@ -1273,23 +1398,25 @@ export class ChartEngine {
     resampleIndicatorToGrid(indicatorData, targetTimestamps) {
         // Trier les données RSI par temps
         const sorted = [...indicatorData].sort((a, b) => a.time - b.time);
+        const times = sorted.map(p => p.time); // Array pour binary search
 
         return targetTimestamps.map(targetTime => {
-            // Trouver le dernier point RSI calculé <= targetTime
-            let lastValid = null;
-
-            for (const point of sorted) {
-                if (point.time <= targetTime) {
-                    lastValid = point;
+            // Binary search: trouver dernier index où time <= targetTime
+            // Optimisation O(log m) au lieu de O(m) par targetTime
+            let low = 0, high = times.length - 1;
+            while (low <= high) {
+                const mid = Math.floor((low + high) / 2);
+                if (times[mid] <= targetTime) {
+                    low = mid + 1;
                 } else {
-                    break; // Dépassé, inutile de continuer
+                    high = mid - 1;
                 }
             }
 
-            if (!lastValid) return null;
+            if (high < 0) return null; // Aucun point avant targetTime
 
             // Retourner avec le timestamp de référence (celui du candle affiché)
-            return {time: targetTime, value: lastValid.value};
+            return {time: targetTime, value: sorted[high].value};
         }).filter(p => p !== null);
     }
 

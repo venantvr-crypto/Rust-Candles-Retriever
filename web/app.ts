@@ -50,6 +50,11 @@ async function initChart(): Promise<void> {
         onError: (error) => {
             console.error('Chart error:', error);
             updateStatus(`Error: ${error.message}`, true);
+        },
+
+        onInvalidateCache: (symbol, timeframe) => {
+            // Invalidate cache when data changes (after fetch)
+            dataManager.invalidate(symbol, timeframe);
         }
     });
 
@@ -217,7 +222,7 @@ function initSettingsPanel(): void {
     reset.addEventListener('click', () => {
         chartConfig.reset();
         loadSettingsToUI();
-        refreshChart();
+        void refreshChart();
     });
 }
 
@@ -279,7 +284,7 @@ function bindSetting(elementId: string, configPath: string, type: string, valueD
         if (callback) {
             callback(value);
         } else {
-            refreshChart();
+            void refreshChart();
         }
     });
 }
@@ -293,7 +298,7 @@ function applyThemeChange(theme: 'light' | 'dark'): void {
         ? 'linear-gradient(135deg, #2c3e50 0%, #34495e 100%)'
         : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
 
-    refreshChart();
+    void refreshChart();
 }
 
 async function refreshChart(): Promise<void> {

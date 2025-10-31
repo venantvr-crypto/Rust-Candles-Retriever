@@ -83,6 +83,28 @@ impl DatabaseManager {
             [],
         )?;
 
+        // Table des indicateurs RSI pré-calculés
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS rsi_values (
+                provider TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                period INTEGER NOT NULL,
+                open_time INTEGER NOT NULL,
+                rsi_value REAL NOT NULL,
+                UNIQUE(provider, symbol, timeframe, period, open_time)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rsi_query
+                ON rsi_values (
+                provider, symbol, timeframe, period, open_time
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
