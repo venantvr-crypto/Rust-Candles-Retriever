@@ -72,6 +72,8 @@ pub struct RealtimeManager {
     command_tx: mpsc::UnboundedSender<Command>,
     /// Canal de broadcast pour les mises à jour de bougies
     broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
+    /// Répertoire des bases de données
+    db_dir: String,
 }
 
 /// Commandes pour le gestionnaire
@@ -83,23 +85,25 @@ enum Command {
 
 impl RealtimeManager {
     /// Crée un nouveau gestionnaire et lance le thread de gestion
-    pub fn new() -> Self {
+    pub fn new(db_dir: String) -> Self {
         let cache = Arc::new(RwLock::new(HashMap::new()));
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
         let manager_cache = Arc::clone(&cache);
         let manager_broadcast = broadcast_tx.clone();
+        let manager_db_dir = db_dir.clone();
 
         // Lancer le thread de gestion en arrière-plan
         tokio::spawn(async move {
-            Self::run_manager(manager_cache, command_rx, manager_broadcast).await;
+            Self::run_manager(manager_cache, command_rx, manager_broadcast, manager_db_dir).await;
         });
 
         Self {
             cache,
             command_tx,
             broadcast_tx,
+            db_dir,
         }
     }
 
@@ -144,6 +148,7 @@ impl RealtimeManager {
         cache: Arc<RwLock<HashMap<StreamKey, RealtimeCandle>>>,
         mut command_rx: mpsc::UnboundedReceiver<Command>,
         broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
+        db_dir: String,
     ) {
         let mut active_streams: HashMap<StreamKey, tokio::task::JoinHandle<()>> = HashMap::new();
 
@@ -163,6 +168,7 @@ impl RealtimeManager {
                     let stream_symbol = symbol.clone();
                     let stream_tf = timeframe.clone();
                     let stream_broadcast = broadcast_tx.clone();
+                    let stream_db_dir = db_dir.clone();
 
                     // Lancer une task pour ce stream
                     let handle = tokio::spawn(async move {
@@ -171,6 +177,7 @@ impl RealtimeManager {
                             stream_symbol,
                             stream_tf,
                             stream_broadcast,
+                            stream_db_dir,
                         )
                         .await;
                     });
@@ -207,6 +214,7 @@ impl RealtimeManager {
         symbol: String,
         timeframe: String,
         broadcast_tx: tokio::sync::broadcast::Sender<CandleUpdate>,
+        db_dir: String,
     ) {
         let binance_interval = Self::to_binance_interval(&timeframe);
         let stream_name = format!("{}@kline_{}", symbol.to_lowercase(), binance_interval);
@@ -241,6 +249,27 @@ impl RealtimeManager {
                                         // Mettre à jour le cache
                                         let key = (symbol.clone(), timeframe.clone());
                                         cache.write().unwrap().insert(key, candle.clone());
+
+                                        // Si bougie fermée, persister en BDD
+                                        if candle.is_closed {
+                                            let db_path = format!("{}/{}.db", db_dir, symbol);
+                                            let sym = symbol.clone();
+                                            let tf = timeframe.clone();
+                                            let c = candle.clone();
+
+                                            tokio::task::spawn_blocking(move || {
+                                                if let Err(e) =
+                                                    Self::persist_candle(&db_path, &sym, &tf, &c)
+                                                {
+                                                    eprintln!("❌ Failed to persist candle: {}", e);
+                                                } else {
+                                                    println!(
+                                                        "💾 Persisted closed candle: {} {} @ {}",
+                                                        sym, tf, c.time
+                                                    );
+                                                }
+                                            });
+                                        }
 
                                         // Broadcaster la mise à jour aux clients WebSocket
                                         let update = CandleUpdate {
@@ -280,5 +309,66 @@ impl RealtimeManager {
         // Notre format: "5m", "1h", "1d"
         // Binance: "5m", "1h", "1d" → identique
         tf.to_string()
+    }
+
+    /// Persiste une bougie fermée en base de données
+    fn persist_candle(
+        db_path: &str,
+        symbol: &str,
+        timeframe: &str,
+        candle: &RealtimeCandle,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use rusqlite::{Connection, params};
+
+        let conn = Connection::open(db_path)?;
+
+        // Calculer close_time (début + durée de la timeframe)
+        let tf_seconds = Self::parse_timeframe_to_seconds(timeframe);
+        let close_time = candle.time + tf_seconds;
+
+        // Insérer la bougie (ou remplacer si déjà existante)
+        conn.execute(
+            "INSERT OR REPLACE INTO candlesticks
+            (provider, symbol, timeframe, open_time, open, high, low, close, volume,
+             close_time, quote_asset_volume, number_of_trades,
+             taker_buy_base_asset_volume, taker_buy_quote_asset_volume, interpolated)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0.0, 0, 0.0, 0.0, 0)",
+            params![
+                "binance",
+                symbol,
+                timeframe,
+                candle.time,
+                candle.open,
+                candle.high,
+                candle.low,
+                candle.close,
+                candle.volume,
+                close_time,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Parse une timeframe en secondes
+    fn parse_timeframe_to_seconds(tf: &str) -> i64 {
+        let num: i64 = tf
+            .chars()
+            .take_while(|c| c.is_numeric())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(1);
+
+        let unit = tf.chars().last().unwrap_or('m');
+
+        match unit {
+            's' => num,
+            'm' => num * 60,
+            'h' => num * 3600,
+            'd' => num * 86400,
+            'w' => num * 604800,
+            'M' => num * 2592000, // 30 jours approximatif
+            _ => 60,              // par défaut 1 minute
+        }
     }
 }

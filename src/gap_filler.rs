@@ -1,11 +1,11 @@
+use crate::utils;
 /// Module d'interpolation linéaire pour combler les trous dans les données
 ///
 /// Ce module détecte les gaps (intervalles manquants) et génère des bougies
 /// interpolées pour maintenir la continuité de la série temporelle
 use anyhow::Result;
-use rusqlite::{Connection, params};
 use chrono::TimeZone;
-use crate::utils;
+use rusqlite::{Connection, params};
 
 /// Structure pour stocker temporairement une bougie
 ///
@@ -69,10 +69,16 @@ impl GapFiller {
         let paris_tz = chrono_tz::Europe::Paris;
         let start_dt = paris_tz.timestamp_millis_opt(start_time).unwrap();
         let end_dt = paris_tz.timestamp_millis_opt(end_time).unwrap();
-        println!("🔍 count_gaps_in_range: {}/{} {} → start_time={} ({}) end_time={} ({})",
-                 provider, symbol, timeframe,
-                 start_time, start_dt.format("%Y-%m-%d %H:%M:%S %Z"),
-                 end_time, end_dt.format("%Y-%m-%d %H:%M:%S %Z"));
+        println!(
+            "🔍 count_gaps_in_range: {}/{} {} → start_time={} ({}) end_time={} ({})",
+            provider,
+            symbol,
+            timeframe,
+            start_time,
+            start_dt.format("%Y-%m-%d %H:%M:%S %Z"),
+            end_time,
+            end_dt.format("%Y-%m-%d %H:%M:%S %Z")
+        );
 
         let interval = utils::timeframe_to_interval(timeframe);
 
@@ -91,7 +97,10 @@ impl GapFiller {
 
         let gaps = expected_count - actual_count;
 
-        println!("   → expected={} actual={} gaps={}", expected_count, actual_count, gaps);
+        println!(
+            "   → expected={} actual={} gaps={}",
+            expected_count, actual_count, gaps
+        );
 
         // Pas de gaps négatifs (si on a plus de bougies que prévu, c'est suspect mais pas un gap)
         Ok(gaps.max(0))
@@ -251,5 +260,4 @@ impl GapFiller {
                     * ratio,
         }
     }
-
 }

@@ -333,10 +333,7 @@ struct RSIQuery {
 
 /// GET /api/rsi - Récupère les RSI pré-calculés pour une paire/timeframe
 #[get("/api/rsi")]
-async fn get_rsi(
-    data: web::Data<Mutex<AppState>>,
-    query: web::Query<RSIQuery>,
-) -> impl Responder {
+async fn get_rsi(data: web::Data<Mutex<AppState>>, query: web::Query<RSIQuery>) -> impl Responder {
     let symbol = query.symbol.clone();
     let timeframe = query.timeframe.clone();
     let period = query.period.unwrap_or(14);
@@ -386,8 +383,11 @@ async fn get_rsi(
             .map_err(|e| format!("Query error: {}", e))?;
 
         // Construire les paramètres
-        let mut query_params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(symbol.clone()), Box::new(timeframe.clone()), Box::new(period)];
+        let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(symbol.clone()),
+            Box::new(timeframe.clone()),
+            Box::new(period),
+        ];
 
         if let Some(s) = start {
             query_params.push(Box::new(s * 1000)); // Convertir secondes en ms
@@ -534,15 +534,17 @@ async fn fetch_gaps(
             (query.start.unwrap() * 1000, query.end.unwrap() * 1000)
         } else {
             // Récupérer min/max depuis la BDD
-            let mut stmt = conn.prepare(
-                "SELECT MIN(open_time), MAX(open_time) FROM candlesticks
-                 WHERE provider = 'binance' AND symbol = ?1 AND timeframe = ?2"
-            ).map_err(|e| format!("Failed to query range: {}", e))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT MIN(open_time), MAX(open_time) FROM candlesticks
+                 WHERE provider = 'binance' AND symbol = ?1 AND timeframe = ?2",
+                )
+                .map_err(|e| format!("Failed to query range: {}", e))?;
 
-            let range: Result<(Option<i64>, Option<i64>), _> = stmt.query_row(
-                rusqlite::params![&symbol, &timeframe],
-                |row| Ok((row.get(0)?, row.get(1)?))
-            );
+            let range: Result<(Option<i64>, Option<i64>), _> = stmt
+                .query_row(rusqlite::params![&symbol, &timeframe], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                });
 
             match range {
                 Ok((Some(min), Some(max))) => (min, max),
@@ -570,7 +572,10 @@ async fn fetch_gaps(
                     println!("✅ Aucun gap détecté pour {}/{}", symbol, timeframe);
                     return Ok((symbol.clone(), timeframe.clone(), 0i64, 0));
                 }
-                println!("🔍 {} gaps détectés pour {}/{}, fetch...", gap_count, symbol, timeframe);
+                println!(
+                    "🔍 {} gaps détectés pour {}/{}, fetch...",
+                    gap_count, symbol, timeframe
+                );
             }
             Err(e) => {
                 println!("⚠️ Erreur vérification gaps: {}, fetch quand même...", e);
@@ -638,13 +643,7 @@ async fn fetch_gaps(
             println!("   Extended: [{}, {}]", rsi_start, end_check);
 
             if let Err(e) = rust_candles_retriever::rsi::recalculate_all_timeframes(
-                &mut conn,
-                "binance",
-                &symbol,
-                &timeframe,
-                period,
-                rsi_start,
-                end_check,
+                &mut conn, "binance", &symbol, &timeframe, period, rsi_start, end_check,
             ) {
                 println!("⚠️ Erreur recalcul RSI: {}", e);
             }
@@ -1097,7 +1096,7 @@ async fn main() -> std::io::Result<()> {
     println!("📁 Fichiers statiques: ./web");
 
     // Initialiser le gestionnaire de bougies temps réel
-    let realtime = Arc::new(RealtimeManager::new());
+    let realtime = Arc::new(RealtimeManager::new(db_dir.clone()));
     println!("🔌 Gestionnaire WebSocket temps réel initialisé");
 
     // Initialiser le cache pour les requêtes de candles

@@ -9,8 +9,7 @@ use std::path::Path;
 /// Schéma SQL pour la table candlesticks
 ///
 /// Centralisé pour éviter la duplication dans tous les tests et binaires
-pub const SQL_CREATE_TABLE_CANDLESTICKS: &str =
-    "CREATE TABLE IF NOT EXISTS candlesticks (
+pub const SQL_CREATE_TABLE_CANDLESTICKS: &str = "CREATE TABLE IF NOT EXISTS candlesticks (
         provider TEXT NOT NULL,
         symbol TEXT NOT NULL,
         timeframe TEXT NOT NULL,
@@ -30,13 +29,11 @@ pub const SQL_CREATE_TABLE_CANDLESTICKS: &str =
     )";
 
 /// Index pour requêtes sur candlesticks
-pub const SQL_CREATE_INDEX_CANDLESTICKS: &str =
-    "CREATE INDEX IF NOT EXISTS idx_candles_query
+pub const SQL_CREATE_INDEX_CANDLESTICKS: &str = "CREATE INDEX IF NOT EXISTS idx_candles_query
         ON candlesticks (provider, symbol, timeframe, open_time)";
 
 /// Schéma SQL pour la table rsi_values
-pub const SQL_CREATE_TABLE_RSI: &str =
-    "CREATE TABLE IF NOT EXISTS rsi_values (
+pub const SQL_CREATE_TABLE_RSI: &str = "CREATE TABLE IF NOT EXISTS rsi_values (
         provider TEXT NOT NULL,
         symbol TEXT NOT NULL,
         timeframe TEXT NOT NULL,
@@ -47,8 +44,7 @@ pub const SQL_CREATE_TABLE_RSI: &str =
     )";
 
 /// Index pour requêtes sur rsi_values
-pub const SQL_CREATE_INDEX_RSI: &str =
-    "CREATE INDEX IF NOT EXISTS idx_rsi_query
+pub const SQL_CREATE_INDEX_RSI: &str = "CREATE INDEX IF NOT EXISTS idx_rsi_query
         ON rsi_values (provider, symbol, timeframe, period, open_time)";
 
 /// Gestionnaire de la base de données SQLite

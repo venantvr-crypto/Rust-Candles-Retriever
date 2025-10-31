@@ -1,7 +1,6 @@
 /// Module de calcul RSI (Relative Strength Index)
 ///
 /// Fournit des fonctions pour calculer et stocker les valeurs RSI en base de données
-
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
@@ -42,7 +41,11 @@ pub fn calculate_rsi(closes: &[f64], period: usize) -> Vec<Option<f64>> {
     let mut avg_gain: f64 = gains[..period].iter().sum::<f64>() / period as f64;
     let mut avg_loss: f64 = losses[..period].iter().sum::<f64>() / period as f64;
 
-    let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
+    let rs = if avg_loss == 0.0 {
+        100.0
+    } else {
+        avg_gain / avg_loss
+    };
     results[period] = Some(100.0 - (100.0 / (1.0 + rs)));
 
     // RSI suivants: moyenne mobile exponentielle
@@ -50,7 +53,11 @@ pub fn calculate_rsi(closes: &[f64], period: usize) -> Vec<Option<f64>> {
         avg_gain = (avg_gain * (period - 1) as f64 + gains[i]) / period as f64;
         avg_loss = (avg_loss * (period - 1) as f64 + losses[i]) / period as f64;
 
-        let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
+        let rs = if avg_loss == 0.0 {
+            100.0
+        } else {
+            avg_gain / avg_loss
+        };
         results[i + 1] = Some(100.0 - (100.0 / (1.0 + rs)));
     }
 
@@ -82,7 +89,7 @@ pub fn recalculate_rsi_for_range(
             "SELECT open_time, close FROM candlesticks
              WHERE provider = ?1 AND symbol = ?2 AND timeframe = ?3
              AND open_time >= ?4 AND open_time <= ?5
-             ORDER BY open_time ASC"
+             ORDER BY open_time ASC",
         )?;
 
         let mut times = Vec::new();
@@ -90,7 +97,7 @@ pub fn recalculate_rsi_for_range(
 
         let rows = stmt.query_map(
             params![provider, symbol, timeframe, start_time, end_time],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
         )?;
 
         for row_result in rows {
@@ -103,7 +110,11 @@ pub fn recalculate_rsi_for_range(
     };
 
     if closes.len() < period as usize + 1 {
-        println!("   ⚠️  Not enough data for RSI: {} candles (need > {})", closes.len(), period);
+        println!(
+            "   ⚠️  Not enough data for RSI: {} candles (need > {})",
+            closes.len(),
+            period
+        );
         return Ok(0);
     }
 
@@ -118,18 +129,13 @@ pub fn recalculate_rsi_for_range(
         let mut insert_stmt = tx.prepare(
             "INSERT OR REPLACE INTO rsi_values
              (provider, symbol, timeframe, period, open_time, rsi_value)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
 
         for (i, rsi) in rsi_values.iter().enumerate() {
             if let Some(rsi_val) = rsi {
                 insert_stmt.execute(params![
-                    provider,
-                    symbol,
-                    timeframe,
-                    period,
-                    times[i],
-                    rsi_val
+                    provider, symbol, timeframe, period, times[i], rsi_val
                 ])?;
                 count += 1;
             }
@@ -137,8 +143,10 @@ pub fn recalculate_rsi_for_range(
     }
 
     tx.commit()?;
-    println!("   ✅ RSI recalculated: {} values for {}/{} {} (period {})",
-             count, provider, symbol, timeframe, period);
+    println!(
+        "   ✅ RSI recalculated: {} values for {}/{} {} (period {})",
+        count, provider, symbol, timeframe, period
+    );
 
     Ok(count)
 }
@@ -155,16 +163,13 @@ pub fn recalculate_all_timeframes(
     start_time: i64,
     end_time: i64,
 ) -> Result<()> {
-    println!("🔄 Recalculating RSI for {}/{} {} in range...", provider, symbol, timeframe);
+    println!(
+        "🔄 Recalculating RSI for {}/{} {} in range...",
+        provider, symbol, timeframe
+    );
 
     recalculate_rsi_for_range(
-        conn,
-        provider,
-        symbol,
-        timeframe,
-        period,
-        start_time,
-        end_time,
+        conn, provider, symbol, timeframe, period, start_time, end_time,
     )?;
 
     Ok(())

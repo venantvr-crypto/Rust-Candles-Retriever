@@ -5,8 +5,8 @@
 /// 2. Les timeframes complets sont détectés correctement
 /// 3. Le programme saute les timeframes complets lors de la prochaine exécution
 use anyhow::Result;
-use rust_candles_retriever::database::SQL_CREATE_TABLE_CANDLESTICKS;
 use rusqlite::{Connection, params};
+use rust_candles_retriever::database::SQL_CREATE_TABLE_CANDLESTICKS;
 use rust_candles_retriever::utils;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};

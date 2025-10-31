@@ -24,7 +24,7 @@ export class ChartEngine {
     rsiData: Map<string, any[]>;
     rsiVisibility: Map<string, boolean>;
     rsiHistoricalData: Map<string, any[]>; // Cache des données historiques pour RSI temps-réel
-    rsiState: Map<string, {avgGain: number, avgLoss: number, lastClose: number}>; // State pour RSI incrémental O(1)
+    rsiState: Map<string, { avgGain: number, avgLoss: number, lastClose: number }>; // State pour RSI incrémental O(1)
     legendContainer: HTMLDivElement;
     overlayParams: any;
     realtimeCandles: Map<string, any>; // TF → candle en cours
@@ -207,7 +207,8 @@ export class ChartEngine {
             onTimeframeChange: options.onTimeframeChange || (async () => {
             }),
             onError: options.onError || console.error,
-            onInvalidateCache: options.onInvalidateCache || (() => {})
+            onInvalidateCache: options.onInvalidateCache || (() => {
+            })
         };
 
         // Style (sera mis à jour depuis config)
@@ -338,7 +339,7 @@ export class ChartEngine {
         const avgLoss = losses / period;
         const lastClose = candles[candles.length - 1].close;
 
-        this.rsiState.set(tf, { avgGain, avgLoss, lastClose });
+        this.rsiState.set(tf, {avgGain, avgLoss, lastClose});
         console.log(`🔧 RSI state initialized for ${tf}: avgGain=${avgGain.toFixed(4)}, avgLoss=${avgLoss.toFixed(4)}`);
     }
 
@@ -1303,7 +1304,7 @@ export class ChartEngine {
                 if (rsiValues.length > 0) {
                     // Rééchantillonner: pour chaque timestamp de candle affiché,
                     // prendre le dernier RSI calculé <= timestamp
-                    const rsiData = rsiValues.map(r => ({ time: r.time, value: r.rsi_value }));
+                    const rsiData = rsiValues.map(r => ({time: r.time, value: r.rsi_value}));
                     const resampled = this.resampleIndicatorToGrid(rsiData, referenceTimestamps);
                     console.log(`📊 Resampled to ${resampled.length} points for ${tf}`);
 

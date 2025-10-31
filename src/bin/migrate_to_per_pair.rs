@@ -4,7 +4,9 @@
 use anyhow::Result;
 use clap::Parser;
 use rusqlite::{Connection, params};
-use rust_candles_retriever::database::{SQL_CREATE_TABLE_CANDLESTICKS, SQL_CREATE_INDEX_CANDLESTICKS};
+use rust_candles_retriever::database::{
+    SQL_CREATE_INDEX_CANDLESTICKS, SQL_CREATE_TABLE_CANDLESTICKS,
+};
 use std::collections::HashSet;
 use std::path::Path;
 

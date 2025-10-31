@@ -1,10 +1,9 @@
 /// Script pour calculer et stocker les RSI dans la BDD
 ///
 /// Usage: cargo run --bin calculate_rsi [--period 14]
-
 use anyhow::Result;
 use rusqlite::{Connection, params};
-use rust_candles_retriever::database::{SQL_CREATE_TABLE_RSI, SQL_CREATE_INDEX_RSI};
+use rust_candles_retriever::database::{SQL_CREATE_INDEX_RSI, SQL_CREATE_TABLE_RSI};
 use rust_candles_retriever::rsi::calculate_rsi;
 
 fn main() -> Result<()> {
@@ -25,7 +24,8 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let symbol = path.file_stem()
+        let symbol = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("UNKNOWN")
             .to_string();
@@ -57,7 +57,7 @@ fn main() -> Result<()> {
                 let mut candles_stmt = conn.prepare(
                     "SELECT open_time, close FROM candlesticks
                      WHERE provider = 'binance' AND symbol = ?1 AND timeframe = ?2
-                     ORDER BY open_time ASC"
+                     ORDER BY open_time ASC",
                 )?;
 
                 let mut times = Vec::new();
@@ -77,7 +77,11 @@ fn main() -> Result<()> {
             }; // candles_stmt est drop ici
 
             if closes.len() < period + 1 {
-                println!("    ⚠️  Not enough data: {} candles (need > {})", closes.len(), period);
+                println!(
+                    "    ⚠️  Not enough data: {} candles (need > {})",
+                    closes.len(),
+                    period
+                );
                 continue;
             }
 
@@ -90,7 +94,7 @@ fn main() -> Result<()> {
                 let mut insert_stmt = tx.prepare(
                     "INSERT OR REPLACE INTO rsi_values
                      (provider, symbol, timeframe, period, open_time, rsi_value)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )?;
 
                 let mut count = 0;

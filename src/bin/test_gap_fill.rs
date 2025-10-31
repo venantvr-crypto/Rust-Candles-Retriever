@@ -1,7 +1,7 @@
 /// Programme de test pour démontrer le comblement de trous avec interpolation
 use anyhow::Result;
-use rust_candles_retriever::database::SQL_CREATE_TABLE_CANDLESTICKS;
 use rusqlite::{Connection, params};
+use rust_candles_retriever::database::SQL_CREATE_TABLE_CANDLESTICKS;
 use std::path::Path;
 
 fn main() -> Result<()> {

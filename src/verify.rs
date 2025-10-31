@@ -8,10 +8,10 @@
 // - Les OVERLAPS (chevauchements): intervalles trop petits ou négatifs
 // - Les statistiques globales: nombre total, plage temporelle, etc.
 
+use super::utils;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use super::utils;
 
 /// Vérifie que les dates dans la base de données sont espacées de façon homogène
 ///

@@ -42782,6 +42782,7 @@ extensions.add(browserExt, webworkerExt);
 
 // chart-engine.ts
 var ChartEngine = class _ChartEngine {
+  // Throttle RSI updates temps réel
   constructor(container, app, options = {}) {
     this.container = container;
     this.app = app;
@@ -42860,6 +42861,7 @@ var ChartEngine = class _ChartEngine {
     this.rsiData = /* @__PURE__ */ new Map();
     this.rsiVisibility = /* @__PURE__ */ new Map();
     this.rsiHistoricalData = /* @__PURE__ */ new Map();
+    this.rsiState = /* @__PURE__ */ new Map();
     this.realtimeCandles = /* @__PURE__ */ new Map();
     this.realtimeWs = null;
     this.realtimeSubscribed = /* @__PURE__ */ new Set();
@@ -42867,6 +42869,7 @@ var ChartEngine = class _ChartEngine {
     this.renderScheduled = false;
     this.overlayRenderScheduled = false;
     this.rafId = null;
+    this.realtimeRSIThrottleTimer = null;
     this.legendContainer = document.createElement("div");
     this.legendContainer.style.cssText = "position: absolute; bottom: 45px; left: 80px; z-index: 10; pointer-events: auto;";
     this.container.appendChild(this.legendContainer);
@@ -42903,7 +42906,9 @@ var ChartEngine = class _ChartEngine {
       onLoadData: options.onLoadData || (async () => []),
       onTimeframeChange: options.onTimeframeChange || (async () => {
       }),
-      onError: options.onError || console.error
+      onError: options.onError || console.error,
+      onInvalidateCache: options.onInvalidateCache || (() => {
+      })
     };
     this.theme = {};
     this.updateTheme();
@@ -42969,6 +42974,41 @@ var ChartEngine = class _ChartEngine {
     }
     return rsi;
   }
+  /**
+   * Calcul incrémental RSI O(1) pour mises à jour temps réel
+   * Nécessite state initialisé (avgGain, avgLoss, lastClose)
+   */
+  calculateIncrementalRSI(newClose, tf, period = 14) {
+    if (!this.rsiState.has(tf)) {
+      return null;
+    }
+    const state = this.rsiState.get(tf);
+    const change = newClose - state.lastClose;
+    const gain = Math.max(change, 0);
+    const loss = Math.abs(Math.min(change, 0));
+    state.avgGain = (state.avgGain * (period - 1) + gain) / period;
+    state.avgLoss = (state.avgLoss * (period - 1) + loss) / period;
+    state.lastClose = newClose;
+    const rs = state.avgGain / state.avgLoss;
+    return 100 - 100 / (1 + rs);
+  }
+  /**
+   * Initialise le state RSI pour permettre les updates incrémentaux
+   */
+  initRSIState(tf, candles, period = 14) {
+    if (candles.length < period + 1) return;
+    let gains = 0, losses = 0;
+    for (let i2 = 1; i2 <= period; i2++) {
+      const change = candles[i2].close - candles[i2 - 1].close;
+      if (change > 0) gains += change;
+      else losses += Math.abs(change);
+    }
+    const avgGain = gains / period;
+    const avgLoss = losses / period;
+    const lastClose = candles[candles.length - 1].close;
+    this.rsiState.set(tf, { avgGain, avgLoss, lastClose });
+    console.log(`\u{1F527} RSI state initialized for ${tf}: avgGain=${avgGain.toFixed(4)}, avgLoss=${avgLoss.toFixed(4)}`);
+  }
   setTimeframes(timeframes) {
     this.timeframes = [...timeframes].sort(
       (a2, b2) => this.parseTimeframeToSeconds(a2) - this.parseTimeframeToSeconds(b2)
@@ -43025,7 +43065,7 @@ var ChartEngine = class _ChartEngine {
     canvas.addEventListener("mouseup", () => this.handleMouseUp());
     window.addEventListener("resize", () => this.handleResize());
   }
-  handleWheel(e2) {
+  async handleWheel(e2) {
     e2.preventDefault();
     if (this.state.data.length === 0) return;
     if (this.store) {
@@ -43080,14 +43120,14 @@ var ChartEngine = class _ChartEngine {
       }
       this.state.viewStart = pivotTime - newWidth * pivotRatio;
       this.state.viewEnd = pivotTime + newWidth * (1 - pivotRatio);
-      const didChange = this.checkAndSwitchTimeframe(pivotTime, pivotRatio);
+      const didChange = await this.checkAndSwitchTimeframe(pivotTime, pivotRatio);
       if (!didChange) {
         const currentWidth = this.state.viewEnd - this.state.viewStart;
         if (currentWidth < minWidth) {
           this.state.viewStart = pivotTime - minWidth * pivotRatio;
           this.state.viewEnd = pivotTime + minWidth * (1 - pivotRatio);
         }
-        this.checkAndReloadData();
+        void this.checkAndReloadData();
         this.scheduleRender();
       }
     } finally {
@@ -43126,7 +43166,7 @@ var ChartEngine = class _ChartEngine {
   handleMouseUp() {
     this.state.isDragging = false;
     this.overlayCanvas.style.cursor = "crosshair";
-    this.checkAndReloadData();
+    void this.checkAndReloadData();
   }
   handleDrag(e2) {
     const dx = e2.clientX - this.state.dragStartX;
@@ -43142,7 +43182,7 @@ var ChartEngine = class _ChartEngine {
     this.renderBackground();
     this.render();
   }
-  checkAndSwitchTimeframe(pivotTime = null, pivotRatio = null) {
+  async checkAndSwitchTimeframe(pivotTime = null, pivotRatio = null) {
     const viewWidth = this.state.viewEnd - this.state.viewStart;
     const tfSeconds = this.parseTimeframeToSeconds(this.state.currentTimeframe);
     const visibleBars = viewWidth / tfSeconds;
@@ -43161,7 +43201,7 @@ var ChartEngine = class _ChartEngine {
       };
       console.log(`\u{1F53D} Zoom IN: ${this.state.currentTimeframe} \u2192 ${newTF} (${Math.round(visibleBars)} bars < ${this.state.minBars})`);
       console.log(`   \u{1F4BE} Saving current view with pivot at ${pivotTime ? new Date(pivotTime * 1e3).toISOString().substring(0, 16) : "N/A"} (ratio: ${pivotRatio ? pivotRatio.toFixed(3) : "N/A"})`);
-      this.callbacks.onTimeframeChange(newTF, savedRange);
+      await this.callbacks.onTimeframeChange(newTF, savedRange);
       return true;
     }
     if (visibleBars > this.state.maxBars && currentIndex < this.timeframes.length - 1) {
@@ -43178,7 +43218,7 @@ var ChartEngine = class _ChartEngine {
       };
       console.log(`\u{1F53C} Zoom OUT: ${this.state.currentTimeframe} \u2192 ${newTF} (${Math.round(visibleBars)} bars > ${this.state.maxBars})`);
       console.log(`   \u{1F4BE} Saving current view with pivot at ${pivotTime ? new Date(pivotTime * 1e3).toISOString().substring(0, 16) : "N/A"} (ratio: ${pivotRatio ? pivotRatio.toFixed(3) : "N/A"})`);
-      this.callbacks.onTimeframeChange(newTF, savedRange);
+      await this.callbacks.onTimeframeChange(newTF, savedRange);
       return true;
     }
     return false;
@@ -43287,7 +43327,7 @@ var ChartEngine = class _ChartEngine {
       await this.loadIndicatorData();
       this.renderBackground();
       this.render();
-      this.startRealtimeUpdates();
+      await this.startRealtimeUpdates();
     } catch (error) {
       this.callbacks.onError(error);
       this.renderError(error.message);
@@ -43305,13 +43345,16 @@ var ChartEngine = class _ChartEngine {
     if (missingCandles > 2) {
       console.log(`\u{1F50D} Gap d\xE9tect\xE9: ${Math.floor(missingCandles)} bougies manquantes, fetch...`);
       try {
-        const response = await fetch(`/api/fetch?symbol=${symbol}&timeframe=${timeframe}`, {
+        const start = Math.floor(lastCandle.time);
+        const end = Math.ceil(now);
+        const response = await fetch(`/api/fetch?symbol=${symbol}&timeframe=${timeframe}&start=${start}&end=${end}`, {
           method: "POST"
         });
         if (response.ok) {
           const result = await response.json();
           if (result.inserted > 0) {
-            console.log(`\u2705 ${result.inserted} bougies ajout\xE9es`);
+            console.log(`\u2705 ${result.inserted} bougies ajout\xE9es, invalidating cache...`);
+            this.callbacks.onInvalidateCache(symbol, timeframe);
             return true;
           }
         }
@@ -43442,12 +43485,37 @@ var ChartEngine = class _ChartEngine {
           }
           updated = true;
         } else if (candle.time > lastCandle.time + tfSeconds) {
-          console.log(`\u{1F4CD} Skipping gap (${Math.floor((candle.time - lastCandle.time - tfSeconds) / tfSeconds)} candles missing), adding current candle`);
+          const missingCount = Math.floor((candle.time - lastCandle.time - tfSeconds) / tfSeconds);
+          console.log(`\u{1F4CD} Gap detected (${missingCount} candles missing), fetching and reloading...`);
+          void fetch(`/api/fetch?symbol=${this.state.symbol}&timeframe=${timeframe}&start=${lastCandle.time}&end=${candle.time}`, {
+            method: "POST"
+          }).then(async (response) => {
+            if (response.ok) {
+              const result = await response.json();
+              if (result.inserted > 0) {
+                console.log(`\u2705 Gap filled: ${result.inserted} candles, invalidating cache and reloading...`);
+                this.callbacks.onInvalidateCache(this.state.symbol, timeframe);
+                const newData = await this.callbacks.onLoadData(this.state.symbol, timeframe, null, null);
+                if (newData && newData.length > 0) {
+                  this.state.data = newData;
+                  await this.loadIndicatorData();
+                  this.scheduleRender();
+                  console.log(`\u{1F504} Data reloaded after gap fill: ${newData.length} candles`);
+                }
+              }
+            }
+          }).catch((e2) => console.error("\u274C Gap fill error:", e2));
           this.state.data.push(candle);
           updated = true;
         }
         if (updated) {
-          this.updateRealtimeRSIForAllTimeframes();
+          if (this.realtimeRSIThrottleTimer) {
+            clearTimeout(this.realtimeRSIThrottleTimer);
+          }
+          this.realtimeRSIThrottleTimer = setTimeout(() => {
+            this.updateRealtimeRSIForAllTimeframes();
+            this.realtimeRSIThrottleTimer = null;
+          }, 1e3);
           if (shouldRender) {
             this.scheduleRender();
           }
@@ -43516,7 +43584,7 @@ var ChartEngine = class _ChartEngine {
           this.rsiHistoricalData = /* @__PURE__ */ new Map();
         }
         if (!this.rsiHistoricalData.has(tf)) {
-          this.loadHistoricalDataForRSI(tf, period);
+          void this.loadHistoricalDataForRSI(tf, period);
           continue;
         }
         let data = this.rsiHistoricalData.get(tf) || [];
@@ -43533,13 +43601,19 @@ var ChartEngine = class _ChartEngine {
           }
         }
         if (data.length > period + 1) {
-          const rsi = this.calculateRSI(data, period);
-          const rsiPointsToReplace = Math.min(rsi.length, 10);
-          if (existingRSI.length > rsiPointsToReplace) {
-            const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
-            this.rsiData.set(tf, updatedRSI);
+          const newRSI = this.calculateIncrementalRSI(realtimeCandle.close, tf, period);
+          if (newRSI !== null && existingRSI.length > 0) {
+            existingRSI[existingRSI.length - 1].value = newRSI;
           } else {
-            this.rsiData.set(tf, rsi);
+            console.warn(`\u26A0\uFE0F RSI state not initialized for ${tf}, falling back to full calculation`);
+            const rsi = this.calculateRSI(data, period);
+            const rsiPointsToReplace = Math.min(rsi.length, 10);
+            if (existingRSI.length > rsiPointsToReplace) {
+              const updatedRSI = existingRSI.slice(0, -rsiPointsToReplace).concat(rsi.slice(-rsiPointsToReplace));
+              this.rsiData.set(tf, updatedRSI);
+            } else {
+              this.rsiData.set(tf, rsi);
+            }
           }
         }
       } catch (e2) {
@@ -43597,37 +43671,71 @@ var ChartEngine = class _ChartEngine {
     const period = chartConfig.get("indicators.rsi.period") || 14;
     const referenceTimestamps = this.state.data.map((c2) => c2.time);
     console.log(`\u{1F4CA} Reference timestamps: ${referenceTimestamps.length} candles`);
-    for (const tf of rsiTimeframes) {
+    const currentTF = this.state.currentTimeframe;
+    const otherTFs = rsiTimeframes.filter((tf) => tf !== currentTF);
+    const loadTF = async (tf) => {
       try {
-        const margin = (this.state.viewEnd - this.state.viewStart) * 2;
-        console.log(`\u{1F4CA} Loading ${tf} data for RSI (${this.state.symbol})...`);
-        let data = await this.callbacks.onLoadData(
-          this.state.symbol,
-          tf,
-          Math.floor(this.state.viewStart - margin),
-          Math.ceil(this.state.viewEnd + margin)
-        );
-        console.log(`\u{1F4CA} Loaded ${data?.length || 0} candles for ${tf}`);
-        if (data && data.length > period) {
-          const maxSamples = period * 2;
-          this.rsiHistoricalData.set(tf, data.slice(-maxSamples));
-          const rsi = this.calculateRSI(data, period);
-          console.log(`\u{1F4CA} Calculated ${rsi.length} RSI points for ${tf}`);
-          const resampled = this.resampleIndicatorToGrid(rsi, referenceTimestamps);
+        console.log(`\u{1F4CA} Loading RSI from API for ${this.state.symbol} ${tf}...`);
+        const url = `/api/rsi?symbol=${this.state.symbol}&timeframe=${tf}&period=${period}&start=${Math.floor(this.state.viewStart)}&end=${Math.ceil(this.state.viewEnd)}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const rsiValues = await response.json();
+        console.log(`\u{1F4CA} Loaded ${rsiValues.length} RSI values for ${tf}`);
+        if (rsiValues.length > 0) {
+          const rsiData = rsiValues.map((r2) => ({ time: r2.time, value: r2.rsi_value }));
+          const resampled = this.resampleIndicatorToGrid(rsiData, referenceTimestamps);
           console.log(`\u{1F4CA} Resampled to ${resampled.length} points for ${tf}`);
-          this.rsiData.set(tf, resampled);
+          const maxSamples = period * 2;
+          const tfSeconds = this.parseTimeframeToSeconds(tf);
+          const margin = tfSeconds * maxSamples;
+          const candlesData = await this.callbacks.onLoadData(
+            this.state.symbol,
+            tf,
+            Math.floor(Date.now() / 1e3 - margin),
+            Math.ceil(Date.now() / 1e3)
+          );
+          if (candlesData && candlesData.length > 0) {
+            this.rsiHistoricalData.set(tf, candlesData.slice(-maxSamples));
+            this.initRSIState(tf, candlesData, period);
+          }
           if (!this.rsiVisibility.has(tf)) {
             this.rsiVisibility.set(tf, true);
           }
+          return { tf, resampled, success: true };
         } else {
-          console.warn(`\u274C Not enough data for RSI on ${tf}: ${data?.length || 0} candles (need > ${period})`);
+          console.warn(`\u274C No RSI data for ${tf}`);
+          return { tf, success: false };
         }
       } catch (e2) {
         console.error(`\u274C Failed to load RSI data for ${tf}:`, e2);
+        return { tf, success: false };
+      }
+    };
+    if (rsiTimeframes.includes(currentTF)) {
+      const result = await loadTF(currentTF);
+      if (result.success) {
+        this.rsiData.set(result.tf, result.resampled);
+        console.log(`\u{1F4CA} RSI loaded for current TF: ${currentTF}`);
+        this.updateRSILegend();
+        this.render();
       }
     }
-    console.log(`\u{1F4CA} RSI data loaded for ${this.rsiData.size} timeframes`);
-    this.updateRSILegend();
+    if (otherTFs.length > 0) {
+      Promise.all(otherTFs.map(loadTF)).then((results) => {
+        for (const result of results) {
+          if (result.success) {
+            this.rsiData.set(result.tf, result.resampled);
+          }
+        }
+        console.log(`\u{1F4CA} RSI data loaded for ${this.rsiData.size} timeframes`);
+        this.updateRSILegend();
+        this.render();
+      });
+    } else {
+      console.log(`\u{1F4CA} RSI data loaded for ${this.rsiData.size} timeframes`);
+    }
   }
   updateRSILegend() {
     this.legendContainer.innerHTML = "";
@@ -43652,17 +43760,19 @@ var ChartEngine = class _ChartEngine {
   }
   resampleIndicatorToGrid(indicatorData, targetTimestamps) {
     const sorted = [...indicatorData].sort((a2, b2) => a2.time - b2.time);
+    const times = sorted.map((p2) => p2.time);
     return targetTimestamps.map((targetTime) => {
-      let lastValid = null;
-      for (const point of sorted) {
-        if (point.time <= targetTime) {
-          lastValid = point;
+      let low = 0, high = times.length - 1;
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        if (times[mid] <= targetTime) {
+          low = mid + 1;
         } else {
-          break;
+          high = mid - 1;
         }
       }
-      if (!lastValid) return null;
-      return { time: targetTime, value: lastValid.value };
+      if (high < 0) return null;
+      return { time: targetTime, value: sorted[high].value };
     }).filter((p2) => p2 !== null);
   }
   getRSIColorForTimeframe(tf) {
@@ -44658,7 +44768,7 @@ var DataManager = class {
     }
     if (this.inflightRequests.has(key)) {
       console.log(`[DataManager] Deduplicating request: ${key}`);
-      return this.inflightRequests.get(key);
+      return await this.inflightRequests.get(key);
     }
     console.log(`[DataManager] Cache MISS: ${key}`);
     const promise2 = this.fetchFromAPI(symbol, timeframe, start, end);
@@ -44724,6 +44834,19 @@ var DataManager = class {
     }
     keysToDelete.forEach((key) => this.cache.delete(key));
     console.log(`[DataManager] Cleared cache for ${symbol} (${keysToDelete.length} entries)`);
+  }
+  /**
+   * Invalidate cache for a specific symbol+timeframe (after data changes)
+   */
+  invalidate(symbol, timeframe) {
+    const keysToDelete = [];
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(`${symbol}:${timeframe}:`)) {
+        keysToDelete.push(key);
+      }
+    }
+    keysToDelete.forEach((key) => this.cache.delete(key));
+    console.log(`[DataManager] Invalidated cache for ${symbol}/${timeframe} (${keysToDelete.length} entries)`);
   }
   /**
    * Get cache statistics
@@ -44817,6 +44940,9 @@ async function initChart() {
     onError: (error) => {
       console.error("Chart error:", error);
       updateStatus(`Error: ${error.message}`, true);
+    },
+    onInvalidateCache: (symbol, timeframe) => {
+      dataManager.invalidate(symbol, timeframe);
     }
   });
   store.setChart(chart);
@@ -44943,7 +45069,7 @@ function initSettingsPanel() {
   reset.addEventListener("click", () => {
     chartConfig.reset();
     loadSettingsToUI();
-    refreshChart();
+    void refreshChart();
   });
 }
 function loadSettingsToUI() {
@@ -44992,7 +45118,7 @@ function bindSetting(elementId, configPath, type, valueDisplayId = null, transfo
     if (callback) {
       callback(value);
     } else {
-      refreshChart();
+      void refreshChart();
     }
   });
 }
@@ -45000,7 +45126,7 @@ function applyThemeChange(theme) {
   chartConfig.applyTheme(theme);
   const isDark = theme === "dark";
   document.body.style.background = isDark ? "linear-gradient(135deg, #2c3e50 0%, #34495e 100%)" : "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
-  refreshChart();
+  void refreshChart();
 }
 async function refreshChart() {
   if (chart && store.currentPair) {
