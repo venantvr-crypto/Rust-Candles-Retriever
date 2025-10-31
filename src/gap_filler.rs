@@ -5,6 +5,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use chrono::TimeZone;
+use crate::utils;
 
 /// Structure pour stocker temporairement une bougie
 ///
@@ -73,7 +74,7 @@ impl GapFiller {
                  start_time, start_dt.format("%Y-%m-%d %H:%M:%S %Z"),
                  end_time, end_dt.format("%Y-%m-%d %H:%M:%S %Z"));
 
-        let interval = Self::timeframe_to_interval(timeframe);
+        let interval = utils::timeframe_to_interval(timeframe);
 
         // Calcul théorique: combien de bougies devrait-il y avoir ?
         // +1 car on inclut à la fois start_time et end_time
@@ -104,7 +105,7 @@ impl GapFiller {
         start_time: i64,
         end_time: i64,
     ) -> Result<i64> {
-        let interval = Self::timeframe_to_interval(timeframe);
+        let interval = utils::timeframe_to_interval(timeframe);
 
         // Récupérer toutes les bougies existantes dans la plage
         let candles =
@@ -251,27 +252,4 @@ impl GapFiller {
         }
     }
 
-    /// Convertit un timeframe en intervalle en millisecondes
-    ///
-    /// DESIGN: Fonction helper pour éviter la duplication de code
-    fn timeframe_to_interval(timeframe: &str) -> i64 {
-        match timeframe {
-            "1m" => 60_000,
-            "3m" => 180_000,
-            "5m" => 300_000,
-            "15m" => 900_000,
-            "30m" => 1_800_000,
-            "1h" => 3_600_000,
-            "2h" => 7_200_000,
-            "4h" => 14_400_000,
-            "6h" => 21_600_000,
-            "8h" => 28_800_000,
-            "12h" => 43_200_000,
-            "1d" => 86_400_000,
-            "3d" => 259_200_000,
-            "1w" => 604_800_000,
-            "1M" => 2_592_000_000,
-            _ => 300_000, // Par défaut: 5m
-        }
-    }
 }

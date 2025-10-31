@@ -1,5 +1,6 @@
 /// Programme de test pour démontrer le comblement de trous avec interpolation
 use anyhow::Result;
+use rust_candles_retriever::database::SQL_CREATE_TABLE_CANDLESTICKS;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -43,27 +44,7 @@ fn setup_database(db_file: &str) -> Result<Connection> {
     let path = Path::new(db_file);
     let conn = Connection::open(path)?;
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS candlesticks (
-            provider TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            open_time INTEGER NOT NULL,
-            open REAL NOT NULL,
-            high REAL NOT NULL,
-            low REAL NOT NULL,
-            close REAL NOT NULL,
-            volume REAL NOT NULL,
-            close_time INTEGER NOT NULL,
-            quote_asset_volume REAL NOT NULL,
-            number_of_trades INTEGER NOT NULL,
-            taker_buy_base_asset_volume REAL NOT NULL,
-            taker_buy_quote_asset_volume REAL NOT NULL,
-            interpolated INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(provider, symbol, timeframe, open_time)
-        )",
-        [],
-    )?;
+    conn.execute(SQL_CREATE_TABLE_CANDLESTICKS, [])?;
 
     Ok(conn)
 }

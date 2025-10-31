@@ -5,7 +5,9 @@
 /// 2. Les timeframes complets sont détectés correctement
 /// 3. Le programme saute les timeframes complets lors de la prochaine exécution
 use anyhow::Result;
+use rust_candles_retriever::database::SQL_CREATE_TABLE_CANDLESTICKS;
 use rusqlite::{Connection, params};
+use rust_candles_retriever::utils;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -159,27 +161,7 @@ fn setup_database(db_file: &str) -> Result<Connection> {
     let path = Path::new(db_file);
     let conn = Connection::open(path)?;
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS candlesticks (
-            provider TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            open_time INTEGER NOT NULL,
-            open REAL NOT NULL,
-            high REAL NOT NULL,
-            low REAL NOT NULL,
-            close REAL NOT NULL,
-            volume REAL NOT NULL,
-            close_time INTEGER NOT NULL,
-            quote_asset_volume REAL NOT NULL,
-            number_of_trades INTEGER NOT NULL,
-            taker_buy_base_asset_volume REAL NOT NULL,
-            taker_buy_quote_asset_volume REAL NOT NULL,
-            interpolated INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(provider, symbol, timeframe, open_time)
-        )",
-        [],
-    )?;
+    conn.execute(SQL_CREATE_TABLE_CANDLESTICKS, [])?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS timeframe_status (
@@ -204,13 +186,7 @@ fn insert_candle(
     timeframe: &str,
     open_time: i64,
 ) -> Result<()> {
-    let interval = match timeframe {
-        "5m" => 300_000,
-        "15m" => 900_000,
-        "30m" => 1_800_000,
-        "1h" => 3_600_000,
-        _ => 300_000,
-    };
+    let interval = utils::timeframe_to_interval(timeframe);
 
     conn.execute(
         "INSERT INTO candlesticks (

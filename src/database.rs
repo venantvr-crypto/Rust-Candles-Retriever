@@ -6,6 +6,51 @@ use anyhow::Result;
 use rusqlite::{Connection, Result as SqlResult};
 use std::path::Path;
 
+/// Schéma SQL pour la table candlesticks
+///
+/// Centralisé pour éviter la duplication dans tous les tests et binaires
+pub const SQL_CREATE_TABLE_CANDLESTICKS: &str =
+    "CREATE TABLE IF NOT EXISTS candlesticks (
+        provider TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        open_time INTEGER NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL,
+        close_time INTEGER NOT NULL,
+        quote_asset_volume REAL NOT NULL,
+        number_of_trades INTEGER NOT NULL,
+        taker_buy_base_asset_volume REAL NOT NULL,
+        taker_buy_quote_asset_volume REAL NOT NULL,
+        interpolated INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(provider, symbol, timeframe, open_time)
+    )";
+
+/// Index pour requêtes sur candlesticks
+pub const SQL_CREATE_INDEX_CANDLESTICKS: &str =
+    "CREATE INDEX IF NOT EXISTS idx_candles_query
+        ON candlesticks (provider, symbol, timeframe, open_time)";
+
+/// Schéma SQL pour la table rsi_values
+pub const SQL_CREATE_TABLE_RSI: &str =
+    "CREATE TABLE IF NOT EXISTS rsi_values (
+        provider TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        period INTEGER NOT NULL,
+        open_time INTEGER NOT NULL,
+        rsi_value REAL NOT NULL,
+        UNIQUE(provider, symbol, timeframe, period, open_time)
+    )";
+
+/// Index pour requêtes sur rsi_values
+pub const SQL_CREATE_INDEX_RSI: &str =
+    "CREATE INDEX IF NOT EXISTS idx_rsi_query
+        ON rsi_values (provider, symbol, timeframe, period, open_time)";
+
 /// Gestionnaire de la base de données SQLite
 ///
 /// ARCHITECTURE:
@@ -40,35 +85,8 @@ impl DatabaseManager {
     /// DESIGN: Méthode privée, appelée uniquement depuis new()
     fn init_schema(conn: &Connection) -> SqlResult<()> {
         // Table principale des bougies
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS candlesticks (
-                provider TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                open_time INTEGER NOT NULL,
-                open REAL NOT NULL,
-                high REAL NOT NULL,
-                low REAL NOT NULL,
-                close REAL NOT NULL,
-                volume REAL NOT NULL,
-                close_time INTEGER NOT NULL,
-                quote_asset_volume REAL NOT NULL,
-                number_of_trades INTEGER NOT NULL,
-                taker_buy_base_asset_volume REAL NOT NULL,
-                taker_buy_quote_asset_volume REAL NOT NULL,
-                interpolated INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(provider, symbol, timeframe, open_time)
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_candles_query
-                ON candlesticks (
-                provider, symbol, timeframe, open_time
-            )",
-            [],
-        )?;
+        conn.execute(SQL_CREATE_TABLE_CANDLESTICKS, [])?;
+        conn.execute(SQL_CREATE_INDEX_CANDLESTICKS, [])?;
 
         // Table de statut des timeframes (pour monitoring uniquement)
         conn.execute(
@@ -84,26 +102,8 @@ impl DatabaseManager {
         )?;
 
         // Table des indicateurs RSI pré-calculés
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS rsi_values (
-                provider TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                period INTEGER NOT NULL,
-                open_time INTEGER NOT NULL,
-                rsi_value REAL NOT NULL,
-                UNIQUE(provider, symbol, timeframe, period, open_time)
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_rsi_query
-                ON rsi_values (
-                provider, symbol, timeframe, period, open_time
-            )",
-            [],
-        )?;
+        conn.execute(SQL_CREATE_TABLE_RSI, [])?;
+        conn.execute(SQL_CREATE_INDEX_RSI, [])?;
 
         Ok(())
     }

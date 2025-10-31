@@ -4,6 +4,7 @@
 use anyhow::Result;
 use clap::Parser;
 use rusqlite::{Connection, params};
+use rust_candles_retriever::database::{SQL_CREATE_TABLE_CANDLESTICKS, SQL_CREATE_INDEX_CANDLESTICKS};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -73,33 +74,8 @@ fn migrate_symbol(source: &Connection, symbol: &str, dest_dir: &str) -> Result<(
     let dest = Connection::open(&dest_path)?;
 
     // Créer les tables (même schéma que la base source)
-    dest.execute(
-        "CREATE TABLE IF NOT EXISTS candlesticks (
-            provider TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            open_time INTEGER NOT NULL,
-            open REAL NOT NULL,
-            high REAL NOT NULL,
-            low REAL NOT NULL,
-            close REAL NOT NULL,
-            volume REAL NOT NULL,
-            close_time INTEGER NOT NULL,
-            quote_asset_volume REAL NOT NULL,
-            number_of_trades INTEGER NOT NULL,
-            taker_buy_base_asset_volume REAL NOT NULL,
-            taker_buy_quote_asset_volume REAL NOT NULL,
-            interpolated INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(provider, symbol, timeframe, open_time)
-        )",
-        [],
-    )?;
-
-    dest.execute(
-        "CREATE INDEX IF NOT EXISTS idx_candles_query
-         ON candlesticks(provider, symbol, timeframe, open_time)",
-        [],
-    )?;
+    dest.execute(SQL_CREATE_TABLE_CANDLESTICKS, [])?;
+    dest.execute(SQL_CREATE_INDEX_CANDLESTICKS, [])?;
 
     dest.execute(
         "CREATE TABLE IF NOT EXISTS timeframe_status (

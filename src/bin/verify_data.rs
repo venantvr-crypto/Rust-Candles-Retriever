@@ -13,6 +13,7 @@
 use anyhow::Result;
 use clap::Parser;
 use rusqlite::Connection;
+use rust_candles_retriever::utils;
 use std::path::Path;
 
 // SUBTILITÉ RUST #23: include! macro

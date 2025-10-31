@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
+use rust_candles_retriever::database::{SQL_CREATE_TABLE_RSI, SQL_CREATE_INDEX_RSI};
 use rust_candles_retriever::rsi::calculate_rsi;
 
 fn main() -> Result<()> {
@@ -34,26 +35,8 @@ fn main() -> Result<()> {
         let mut conn = Connection::open(&path)?;
 
         // Vérifier si la table rsi_values existe, sinon la créer
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS rsi_values (
-                provider TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                period INTEGER NOT NULL,
-                open_time INTEGER NOT NULL,
-                rsi_value REAL NOT NULL,
-                UNIQUE(provider, symbol, timeframe, period, open_time)
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_rsi_query
-                ON rsi_values (
-                provider, symbol, timeframe, period, open_time
-            )",
-            [],
-        )?;
+        conn.execute(SQL_CREATE_TABLE_RSI, [])?;
+        conn.execute(SQL_CREATE_INDEX_RSI, [])?;
 
         // Récupérer les timeframes disponibles
         let timeframes: Vec<String> = {
