@@ -622,6 +622,49 @@ async fn fetch_gaps(
             }
         }
 
+        // Recalculer le RSI sur l'intervalle modifié si des bougies ont été insérées
+        if total_inserted > 0 {
+            // RSI nécessite au moins 2×period bougies (28 pour period=14)
+            // Étendre la plage de recalcul pour inclure les 28 dernières bougies
+            let period = 14i64;
+            let interval_ms = match timeframe.as_str() {
+                "1m" => 60_000,
+                "3m" => 180_000,
+                "5m" => 300_000,
+                "15m" => 900_000,
+                "30m" => 1_800_000,
+                "1h" => 3_600_000,
+                "2h" => 7_200_000,
+                "4h" => 14_400_000,
+                "6h" => 21_600_000,
+                "8h" => 28_800_000,
+                "12h" => 43_200_000,
+                "1d" => 86_400_000,
+                "3d" => 259_200_000,
+                "1w" => 604_800_000,
+                _ => 300_000, // Défaut 5m
+            };
+
+            // Étendre le start pour inclure 28 bougies de contexte (2 × period)
+            let rsi_start = start_check - (28 * interval_ms);
+
+            println!("🔄 RSI recalculation: extending range to include 28 candles context");
+            println!("   Original: [{}, {}]", start_check, end_check);
+            println!("   Extended: [{}, {}]", rsi_start, end_check);
+
+            if let Err(e) = rust_candles_retriever::rsi::recalculate_all_timeframes(
+                &mut conn,
+                "binance",
+                &symbol,
+                &timeframe,
+                period,
+                rsi_start,
+                end_check,
+            ) {
+                println!("⚠️ Erreur recalcul RSI: {}", e);
+            }
+        }
+
         Ok((
             symbol.clone(),
             timeframe.clone(),

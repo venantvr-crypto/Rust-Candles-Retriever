@@ -4,52 +4,7 @@
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
-
-/// Calcule le RSI pour une série de prix
-fn calculate_rsi(closes: &[f64], period: usize) -> Vec<Option<f64>> {
-    if closes.len() < period + 1 {
-        return vec![None; closes.len()];
-    }
-
-    let mut results = vec![None; closes.len()];
-
-    // Calculer les changements de prix
-    let mut gains = Vec::new();
-    let mut losses = Vec::new();
-
-    for i in 1..closes.len() {
-        let change = closes[i] - closes[i - 1];
-        if change > 0.0 {
-            gains.push(change);
-            losses.push(0.0);
-        } else {
-            gains.push(0.0);
-            losses.push(change.abs());
-        }
-    }
-
-    if gains.len() < period {
-        return results;
-    }
-
-    // Premier RSI: moyenne simple
-    let mut avg_gain: f64 = gains[..period].iter().sum::<f64>() / period as f64;
-    let mut avg_loss: f64 = losses[..period].iter().sum::<f64>() / period as f64;
-
-    let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
-    results[period] = Some(100.0 - (100.0 / (1.0 + rs)));
-
-    // RSI suivants: moyenne mobile exponentielle
-    for i in period..gains.len() {
-        avg_gain = (avg_gain * (period - 1) as f64 + gains[i]) / period as f64;
-        avg_loss = (avg_loss * (period - 1) as f64 + losses[i]) / period as f64;
-
-        let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
-        results[i + 1] = Some(100.0 - (100.0 / (1.0 + rs)));
-    }
-
-    results
-}
+use rust_candles_retriever::rsi::calculate_rsi;
 
 fn main() -> Result<()> {
     let period: usize = std::env::args()

@@ -4,6 +4,7 @@
 /// interpolées pour maintenir la continuité de la série temporelle
 use anyhow::Result;
 use rusqlite::{Connection, params};
+use chrono::TimeZone;
 
 /// Structure pour stocker temporairement une bougie
 ///
@@ -49,6 +50,11 @@ impl GapFiller {
 
     /// Compte le nombre de gaps dans une plage sans les remplir
     ///
+    /// ALGORITHME OPTIMISÉ:
+    /// 1. Calcule le nombre théorique de bougies sur [start_time, end_time]
+    /// 2. Compte le nombre réel de bougies en BDD
+    /// 3. Différence = nombre de gaps
+    ///
     /// RETOUR: Nombre de bougies manquantes (gaps)
     pub fn count_gaps_in_range(
         conn: &Connection,
@@ -58,32 +64,36 @@ impl GapFiller {
         start_time: i64,
         end_time: i64,
     ) -> Result<i64> {
+        // Debug: afficher les timestamps en Europe/Paris
+        let paris_tz = chrono_tz::Europe::Paris;
+        let start_dt = paris_tz.timestamp_millis_opt(start_time).unwrap();
+        let end_dt = paris_tz.timestamp_millis_opt(end_time).unwrap();
+        println!("🔍 count_gaps_in_range: {}/{} {} → start_time={} ({}) end_time={} ({})",
+                 provider, symbol, timeframe,
+                 start_time, start_dt.format("%Y-%m-%d %H:%M:%S %Z"),
+                 end_time, end_dt.format("%Y-%m-%d %H:%M:%S %Z"));
+
         let interval = Self::timeframe_to_interval(timeframe);
 
-        // Récupérer toutes les bougies existantes dans la plage
-        let candles =
-            Self::fetch_candles_in_range(conn, provider, symbol, timeframe, start_time, end_time)?;
+        // Calcul théorique: combien de bougies devrait-il y avoir ?
+        // +1 car on inclut à la fois start_time et end_time
+        let expected_count = ((end_time - start_time) / interval) + 1;
 
-        if candles.len() < 2 {
-            return Ok(0);
-        }
+        // Compter les bougies réelles en BDD
+        let actual_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM candlesticks
+             WHERE provider = ?1 AND symbol = ?2 AND timeframe = ?3
+             AND open_time >= ?4 AND open_time <= ?5",
+            params![provider, symbol, timeframe, start_time, end_time],
+            |row| row.get(0),
+        )?;
 
-        let mut total_gaps = 0i64;
+        let gaps = expected_count - actual_count;
 
-        // Fenêtre glissante: parcourir paires de bougies consécutives
-        for i in 0..candles.len() - 1 {
-            let current = &candles[i];
-            let next = &candles[i + 1];
+        println!("   → expected={} actual={} gaps={}", expected_count, actual_count, gaps);
 
-            let time_diff = next.open_time - current.open_time;
-
-            if time_diff > interval {
-                let missing_candles = (time_diff / interval) - 1;
-                total_gaps += missing_candles;
-            }
-        }
-
-        Ok(total_gaps)
+        // Pas de gaps négatifs (si on a plus de bougies que prévu, c'est suspect mais pas un gap)
+        Ok(gaps.max(0))
     }
 
     pub fn fill_gaps_in_range(
@@ -100,6 +110,7 @@ impl GapFiller {
         let candles =
             Self::fetch_candles_in_range(conn, provider, symbol, timeframe, start_time, end_time)?;
 
+        // Pas de gaps possibles si moins de 2 bougies (besoin de 2 pour comparer l'intervalle)
         if candles.len() < 2 {
             return Ok(0);
         }

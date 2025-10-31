@@ -1017,7 +1017,7 @@ export class ChartEngine {
                                 if (newData && newData.length > 0) {
                                     this.state.data = newData;
                                     // 3. Recharger le RSI pour toutes les TF
-                                    await this.loadIndicatorData(this.state.symbol, this.state.currentTimeframe);
+                                    await this.loadIndicatorData();
                                     // 4. Render
                                     this.scheduleRender();
                                     console.log(`🔄 Data reloaded after gap fill: ${newData.length} candles`);
