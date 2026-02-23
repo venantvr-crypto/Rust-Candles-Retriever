@@ -131,7 +131,7 @@ Health check de l'API.
 - ✅ Stockage SQLite avec provider/symbol/timeframe
 - ✅ Option `--force` pour forcer le retraitement
 
-# Documentation des Commentaires Rust
+## Documentation des Commentaires Rust
 
 Ce document liste toutes les subtilités Rust expliquées dans les commentaires du code.
 
@@ -233,7 +233,7 @@ Voir les fichiers suivants pour des exemples complets:
 - `src/bin/verify_data.rs`: Binaire standalone
 - `src/bin/test_gap_fill.rs`: Tests d'interpolation
 
-# Gestion de la Complétion des Timeframes
+## Gestion de la Complétion des Timeframes
 
 ## Vue d'ensemble
 
