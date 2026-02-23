@@ -498,3 +498,7 @@ ETHUSDT|5m |2020-03-14 00:00:00|COMPLET ✅ |2025-10-26 13:00:00
 - ✅ **Option `--force`** pour forcer le retraitement
 - ✅ **Table `timeframe_status`** pour tracker l'état de chaque timeframe
 - ✅ **Optimisation automatique** de la bande passante et du temps d'exécution
+
+## Stack
+
+[![Stack](https://skillicons.dev/icons?i=rust,sqlite&theme=dark)](https://skillicons.dev)
